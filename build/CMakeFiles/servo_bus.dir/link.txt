@@ -1,0 +1,2 @@
+/usr/bin/ar qc libservo_bus.a CMakeFiles/servo_bus.dir/servo_bus.cpp.o
+/usr/bin/ranlib libservo_bus.a

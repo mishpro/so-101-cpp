@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/mish/develop/so-101-cpp/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
