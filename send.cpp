@@ -10,6 +10,8 @@
 int main(int argc, char** argv) {
     const char* port = "/dev/ttyACM0";
     uint16_t speed = 100;
+    bool set_middle = false;
+    bool set_base = false;
     std::vector<std::pair<uint8_t, float>> commands;
 
     for (int argument_index = 1; argument_index < argc; ++argument_index) {
@@ -40,9 +42,35 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (argument.size() < 3 || argument[0] != '-' || argument[1] != 'j') {
+        if (argument == "--set-middle") {
+            if (set_middle || set_base || !commands.empty()) {
+                std::cerr << "--set-middle cannot be combined with another preset"
+                          << std::endl;
+                return 1;
+            }
+            set_middle = true;
+            continue;
+        }
+
+        if (argument == "--set-base") {
+            if (set_middle || set_base || !commands.empty()) {
+                std::cerr << "--set-base cannot be combined with another preset"
+                          << std::endl;
+                return 1;
+            }
+            set_base = true;
+            continue;
+        }
+
+        if (set_middle || set_base || argument.size() < 3 || argument[0] != '-' ||
+            argument[1] != 'j') {
+            if (set_middle || set_base) {
+                std::cerr << "Preset cannot be combined with joint commands"
+                          << std::endl;
+                return 1;
+            }
             std::cerr << "Usage: " << argv[0]
-                      << " [-p PORT] [-s SPEED] [-j1..-j6 ANGLE]..."
+                      << " [-p PORT] [-s SPEED] [--set-middle | --set-base | -j1..-j6 ANGLE]..."
                       << std::endl;
             return 1;
         }
@@ -66,10 +94,10 @@ int main(int argc, char** argv) {
         commands.emplace_back(static_cast<uint8_t>(joint_id), angle);
     }
 
-    if (commands.empty()) {
+    if (commands.empty() && !set_middle && !set_base) {
         std::cout << "No joints specified. Nothing was sent." << std::endl;
         std::cout << "Usage: " << argv[0]
-                  << " [-p PORT] [-s SPEED] [-j1..-j6 ANGLE]..."
+                  << " [-p PORT] [-s SPEED] [--set-middle | --set-base | -j1..-j6 ANGLE]..."
                   << std::endl;
         return 0;
     }
@@ -85,12 +113,41 @@ int main(int argc, char** argv) {
 
     std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
 
+    if (set_middle) {
+        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+            const ServoLimits& joint_limits = limits[joint_id - 1];
+            const float middle_angle =
+                static_cast<float>(joint_limits.max_position -
+                                   joint_limits.min_position) *
+                (180.0f / 4095.0f);
+            commands.emplace_back(joint_id, middle_angle);
+        }
+    }
+
+    if (set_base) {
+        constexpr float base_positions[] = {
+            0.5f, 0.0f, 1.0f, 0.75f, 0.5f, 0.0f
+        };
+        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+            const ServoLimits& joint_limits = limits[joint_id - 1];
+            const float range_degrees =
+                static_cast<float>(joint_limits.max_position -
+                                   joint_limits.min_position) *
+                (360.0f / 4095.0f);
+            commands.emplace_back(
+                joint_id, range_degrees * base_positions[joint_id - 1]);
+        }
+    }
+
+    bool all_commands_succeeded = true;
     for (const auto& command : commands) {
-        write_joint_angle(serial_fd, command.first, command.second, speed,
-                  limits[command.first - 1]);
+        if (!write_joint_angle(serial_fd, command.first, command.second, speed,
+                               limits[command.first - 1])) {
+            all_commands_succeeded = false;
+        }
         usleep(10000);
     }
 
     close(serial_fd);
-    return 0;
+    return all_commands_succeeded ? 0 : 1;
 }
