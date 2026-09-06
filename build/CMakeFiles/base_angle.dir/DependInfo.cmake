@@ -9,7 +9,6 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/mish/develop/so-101-cpp/base_angle.cpp" "CMakeFiles/base_angle.dir/base_angle.cpp.o" "gcc" "CMakeFiles/base_angle.dir/base_angle.cpp.o.d"
-  "" "base_angle" "gcc" "CMakeFiles/base_angle.dir/link.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

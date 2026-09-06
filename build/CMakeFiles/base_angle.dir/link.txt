@@ -1,1 +1,1 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/base_angle.dir/link.d CMakeFiles/base_angle.dir/base_angle.cpp.o -o base_angle  libservo_bus.a
+/usr/bin/c++ CMakeFiles/base_angle.dir/base_angle.cpp.o -o base_angle  libservo_bus.a 

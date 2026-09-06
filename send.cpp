@@ -1,5 +1,6 @@
 #include "servo_bus.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -56,9 +57,9 @@ int main(int argc, char** argv) {
 
         char* angle_end = nullptr;
         float angle = std::strtof(argv[++argument_index], &angle_end);
-        if (*angle_end != '\0' || angle < 0.0f || angle > 360.0f) {
+        if (*angle_end != '\0' || !std::isfinite(angle) || angle < 0.0f) {
             std::cerr << "Invalid angle for " << argument
-                      << ": expected a value from 0 to 360" << std::endl;
+                      << ": expected a finite value from 0 degrees" << std::endl;
             return 1;
         }
 
@@ -76,10 +77,17 @@ int main(int argc, char** argv) {
     int serial_fd = configure_serial_port(port);
     if (serial_fd < 0) return 1;
 
+    ServoLimits limits[6]{};
+    if (!load_or_read_servo_limits(serial_fd, "servo_limits.json", limits)) {
+        close(serial_fd);
+        return 1;
+    }
+
     std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
 
     for (const auto& command : commands) {
-        write_joint_angle(serial_fd, command.first, command.second, speed);
+        write_joint_angle(serial_fd, command.first, command.second, speed,
+                  limits[command.first - 1]);
         usleep(10000);
     }
 

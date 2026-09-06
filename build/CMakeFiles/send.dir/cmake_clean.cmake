@@ -1,5 +1,4 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/send.dir/link.d"
   "CMakeFiles/send.dir/send.cpp.o"
   "CMakeFiles/send.dir/send.cpp.o.d"
   "send"

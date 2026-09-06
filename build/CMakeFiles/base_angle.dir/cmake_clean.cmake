@@ -1,5 +1,4 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/base_angle.dir/link.d"
   "CMakeFiles/base_angle.dir/base_angle.cpp.o"
   "CMakeFiles/base_angle.dir/base_angle.cpp.o.d"
   "base_angle"

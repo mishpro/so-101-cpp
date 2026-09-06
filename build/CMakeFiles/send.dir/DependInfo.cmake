@@ -9,7 +9,6 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/mish/develop/so-101-cpp/send.cpp" "CMakeFiles/send.dir/send.cpp.o" "gcc" "CMakeFiles/send.dir/send.cpp.o.d"
-  "" "send" "gcc" "CMakeFiles/send.dir/link.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

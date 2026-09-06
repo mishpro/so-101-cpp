@@ -1,1 +1,1 @@
-/usr/bin/c++ -Wl,--dependency-file=CMakeFiles/send.dir/link.d CMakeFiles/send.dir/send.cpp.o -o send  libservo_bus.a
+/usr/bin/c++ CMakeFiles/send.dir/send.cpp.o -o send  libservo_bus.a 
