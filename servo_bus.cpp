@@ -19,6 +19,7 @@ constexpr uint8_t REG_MAX_POSITION_LIMIT = 0x0B;
 constexpr uint8_t REG_GOAL_POSITION = 0x2A;
 constexpr uint8_t REG_GOAL_VELOCITY = 0x2E;
 constexpr uint8_t REG_PRESENT_POSITION = 0x38;
+constexpr uint8_t REG_TORQUE_ENABLE = 0x28;
 constexpr speed_t SERVO_BAUD = B1000000;
 
 uint8_t checksum(const uint8_t* packet, int first, int last) {
@@ -237,6 +238,27 @@ bool write_register(int fd, uint8_t servo_id, uint8_t address, uint16_t value) {
     packet[8] = checksum(packet, 2, 7);
 
     return write_packet(fd, packet, sizeof(packet));
+}
+
+bool write_byte_register(int fd, uint8_t servo_id, uint8_t address,
+                         uint8_t value) {
+    uint8_t packet[8] = {
+        0xFF, 0xFF, servo_id, 0x04, INST_WRITE, address, value, 0x00
+    };
+    packet[7] = checksum(packet, 2, 6);
+    return write_packet(fd, packet, sizeof(packet));
+}
+
+bool disable_servo_torque(int fd, uint8_t servo_id) {
+    if (!write_byte_register(fd, servo_id, REG_TORQUE_ENABLE, 0)) {
+        std::cerr << "Failed to disable torque on Joint "
+                  << static_cast<int>(servo_id) << std::endl;
+        return false;
+    }
+
+    std::cout << "Torque disabled on Joint "
+              << static_cast<int>(servo_id) << std::endl;
+    return true;
 }
 
 bool write_joint_angle(int fd, uint8_t servo_id, float angle_degrees,

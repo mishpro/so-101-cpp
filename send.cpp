@@ -2,16 +2,19 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <unistd.h>
 
 int main(int argc, char** argv) {
-    const char* port = "/dev/ttyACM0";
-    uint16_t speed = 100;
+    const char* port = "/dev/ttyACM1";
+    uint16_t speed = 300;
     bool set_middle = false;
     bool set_base = false;
+    bool disable_torque = false;
+    bool show_limits = false;
     std::vector<std::pair<uint8_t, float>> commands;
 
     for (int argument_index = 1; argument_index < argc; ++argument_index) {
@@ -62,15 +65,39 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (set_middle || set_base || argument.size() < 3 || argument[0] != '-' ||
+        if (argument == "--disable-torque") {
+            if (disable_torque || show_limits || set_middle || set_base ||
+                !commands.empty()) {
+                std::cerr << "--disable-torque cannot be combined with another command"
+                          << std::endl;
+                return 1;
+            }
+            disable_torque = true;
+            continue;
+        }
+
+        if (argument == "--show-limits") {
+            if (show_limits || disable_torque || set_middle || set_base ||
+                !commands.empty()) {
+                std::cerr << "--show-limits cannot be combined with another command"
+                          << std::endl;
+                return 1;
+            }
+            show_limits = true;
+            continue;
+        }
+
+        if (show_limits || disable_torque || set_middle || set_base ||
+            argument.size() < 3 ||
+            argument[0] != '-' ||
             argument[1] != 'j') {
-            if (set_middle || set_base) {
-                std::cerr << "Preset cannot be combined with joint commands"
+            if (show_limits || disable_torque || set_middle || set_base) {
+                std::cerr << "Command cannot be combined with joint commands"
                           << std::endl;
                 return 1;
             }
             std::cerr << "Usage: " << argv[0]
-                      << " [-p PORT] [-s SPEED] [--set-middle | --set-base | -j1..-j6 ANGLE]..."
+                      << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | -j1..-j6 ANGLE]..."
                       << std::endl;
             return 1;
         }
@@ -94,10 +121,11 @@ int main(int argc, char** argv) {
         commands.emplace_back(static_cast<uint8_t>(joint_id), angle);
     }
 
-    if (commands.empty() && !set_middle && !set_base) {
+    if (commands.empty() && !set_middle && !set_base && !disable_torque &&
+        !show_limits) {
         std::cout << "No joints specified. Nothing was sent." << std::endl;
         std::cout << "Usage: " << argv[0]
-                  << " [-p PORT] [-s SPEED] [--set-middle | --set-base | -j1..-j6 ANGLE]..."
+                  << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | -j1..-j6 ANGLE]..."
                   << std::endl;
         return 0;
     }
@@ -112,6 +140,40 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
+
+    if (show_limits) {
+        std::cout << "Joint | min degrees | max degrees | min step | max step"
+                  << std::endl;
+        std::cout << "------+-------------+-------------+----------+---------"
+                  << std::endl;
+        std::cout << std::fixed << std::setprecision(2);
+        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+            const ServoLimits& joint_limits = limits[joint_id - 1];
+            const float max_angle =
+                static_cast<float>(joint_limits.max_position -
+                                   joint_limits.min_position) *
+                (360.0f / 4095.0f);
+            std::cout << std::setw(5) << static_cast<int>(joint_id) << " | "
+                      << std::setw(11) << 0.0f << " | "
+                      << std::setw(11) << max_angle << " | "
+                      << std::setw(8) << joint_limits.min_position << " | "
+                      << std::setw(8) << joint_limits.max_position << std::endl;
+        }
+        close(serial_fd);
+        return 0;
+    }
+
+    if (disable_torque) {
+        bool all_commands_succeeded = true;
+        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+            if (!disable_servo_torque(serial_fd, joint_id)) {
+                all_commands_succeeded = false;
+            }
+            usleep(10000);
+        }
+        close(serial_fd);
+        return all_commands_succeeded ? 0 : 1;
+    }
 
     if (set_middle) {
         for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
