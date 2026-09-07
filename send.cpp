@@ -1,16 +1,58 @@
 #include "servo_bus.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
 #include <unistd.h>
 
+namespace {
+using json = nlohmann::json;
+
+struct SendConfig {
+    std::string port;
+    uint16_t speed;
+    float joint_speed_divisor;
+};
+
+bool load_send_config(const std::string& path, SendConfig& config) {
+    std::ifstream file(path);
+    if (!file) return false;
+
+    try {
+        const json data = json::parse(file);
+        config.port = data.at("port").get<std::string>();
+
+        const unsigned int speed = data.at("speed").get<unsigned int>();
+        if (speed < 1 || speed > 1000) return false;
+        config.speed = static_cast<uint16_t>(speed);
+
+        config.joint_speed_divisor =
+            data.at("joint_speed_divisor").get<float>();
+        return !config.port.empty() &&
+               std::isfinite(config.joint_speed_divisor) &&
+               config.joint_speed_divisor > 0.0f;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+}
+
 int main(int argc, char** argv) {
-    const char* port = "/dev/ttyACM1";
-    uint16_t speed = 300;
+    SendConfig config{};
+    if (!load_send_config("send_config.json", config)) {
+        std::cerr << "Failed to load valid send_config.json" << std::endl;
+        return 1;
+    }
+
+    std::string port = config.port;
+    uint16_t speed = config.speed;
     bool set_middle = false;
     bool set_base = false;
     bool disable_torque = false;
@@ -130,7 +172,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    int serial_fd = configure_serial_port(port);
+    int serial_fd = configure_serial_port(port.c_str());
     if (serial_fd < 0) return 1;
 
     ServoLimits limits[6]{};
@@ -203,8 +245,12 @@ int main(int argc, char** argv) {
 
     bool all_commands_succeeded = true;
     for (const auto& command : commands) {
-        if (!write_joint_angle(serial_fd, command.first, command.second, speed,
-                               limits[command.first - 1])) {
+        const float speed_divisor =
+            std::pow(config.joint_speed_divisor, command.first - 1);
+        const uint16_t joint_speed = std::max<uint16_t>(
+            1, static_cast<uint16_t>(speed / speed_divisor));
+        if (!write_joint_angle(serial_fd, command.first, command.second,
+                               joint_speed, limits[command.first - 1])) {
             all_commands_succeeded = false;
         }
         usleep(10000);

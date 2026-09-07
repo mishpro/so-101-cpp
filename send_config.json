@@ -1,0 +1,5 @@
+{
+  "port": "/dev/ttyACM1",
+  "speed": 800,
+  "joint_speed_divisor": 1.2
+}

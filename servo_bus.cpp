@@ -1,17 +1,19 @@
 #include "servo_bus.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <fstream>
-#include <regex>
-#include <sstream>
 #include <termios.h>
 #include <unistd.h>
 
 namespace {
+using json = nlohmann::json;
+
 constexpr uint8_t INST_READ = 0x02;
 constexpr uint8_t INST_WRITE = 0x03;
 constexpr uint8_t REG_MIN_POSITION_LIMIT = 0x09;
@@ -144,26 +146,31 @@ bool load_servo_limits(const std::string& path, ServoLimits limits[6]) {
     std::ifstream file(path);
     if (!file) return false;
 
-    std::stringstream contents;
-    contents << file.rdbuf();
-    const std::string text = contents.str();
-    const std::regex entry(
-        R"("joint"\s*:\s*(\d+)\s*,\s*"min"\s*:\s*(\d+)\s*,\s*"max"\s*:\s*(\d+))");
     bool found[6] = {};
-    for (std::sregex_iterator it(text.begin(), text.end(), entry), end;
-         it != end; ++it) {
-        const int joint = std::stoi((*it)[1].str());
-        const unsigned long min_position = std::stoul((*it)[2].str());
-        const unsigned long max_position = std::stoul((*it)[3].str());
-        if (joint < 1 || joint > 6 || min_position > UINT16_MAX ||
-            max_position > UINT16_MAX || max_position <= min_position ||
-            found[joint - 1]) {
-            return false;
+    try {
+        const json data = json::parse(file);
+        const auto& servos = data.at("servos");
+        if (!servos.is_array() || servos.size() != 6) return false;
+
+        for (const auto& servo : servos) {
+            const int joint = servo.at("joint").get<int>();
+            const unsigned long min_position =
+                servo.at("min").get<unsigned long>();
+            const unsigned long max_position =
+                servo.at("max").get<unsigned long>();
+            if (joint < 1 || joint > 6 || min_position > UINT16_MAX ||
+                max_position > UINT16_MAX || max_position <= min_position ||
+                found[joint - 1]) {
+                return false;
+            }
+            limits[joint - 1] = {static_cast<uint16_t>(min_position),
+                                  static_cast<uint16_t>(max_position)};
+            found[joint - 1] = true;
         }
-        limits[joint - 1] = {static_cast<uint16_t>(min_position),
-                              static_cast<uint16_t>(max_position)};
-        found[joint - 1] = true;
+    } catch (const std::exception&) {
+        return false;
     }
+
     for (bool joint_found : found) {
         if (!joint_found) return false;
     }
@@ -173,14 +180,18 @@ bool load_servo_limits(const std::string& path, ServoLimits limits[6]) {
 bool save_servo_limits(const std::string& path, const ServoLimits limits[6]) {
     std::ofstream file(path);
     if (!file) return false;
-    file << "{\n  \"servos\": [\n";
+
+    json data;
+    data["servos"] = json::array();
     for (int index = 0; index < 6; ++index) {
-        file << "    { \"joint\": " << index + 1
-             << ", \"min\": " << limits[index].min_position
-             << ", \"max\": " << limits[index].max_position << " }"
-             << (index == 5 ? "\n" : ",\n");
+        data["servos"].push_back({
+            {"joint", index + 1},
+            {"min", limits[index].min_position},
+            {"max", limits[index].max_position}
+        });
     }
-    file << "  ]\n}\n";
+
+    file << data.dump(2) << '\n';
     return file.good();
 }
 
