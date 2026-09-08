@@ -1,5 +1,11 @@
 {
-  "port": "/dev/ttyACM1",
-  "speed": 800,
-  "joint_speed_divisor": 1.2
+  "port": "/dev/ttyACM0",
+  "speed": 600,
+  "joint_speed_divisor": 1.2,
+  "urdf_path": "~/develop/urdf/so101_new_calib.urdf",
+  "end_effector_frame": "gripper_frame_link",
+  "ik_max_iterations": 200,
+  "ik_damping": 0.01,
+  "ik_position_tolerance": 0.0001,
+  "cartesian_step": 0.01
 }

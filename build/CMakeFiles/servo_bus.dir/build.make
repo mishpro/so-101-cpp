@@ -53,10 +53,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/mish/develop/so-101-cpp
+CMAKE_SOURCE_DIR = /home/user/develop/so-101-cpp
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/mish/develop/so-101-cpp/build
+CMAKE_BINARY_DIR = /home/user/develop/so-101-cpp/build
 
 # Include any dependencies generated for this target.
 include CMakeFiles/servo_bus.dir/depend.make
@@ -70,18 +70,18 @@ include CMakeFiles/servo_bus.dir/progress.make
 include CMakeFiles/servo_bus.dir/flags.make
 
 CMakeFiles/servo_bus.dir/servo_bus.cpp.o: CMakeFiles/servo_bus.dir/flags.make
-CMakeFiles/servo_bus.dir/servo_bus.cpp.o: /home/mish/develop/so-101-cpp/servo_bus.cpp
+CMakeFiles/servo_bus.dir/servo_bus.cpp.o: /home/user/develop/so-101-cpp/servo_bus.cpp
 CMakeFiles/servo_bus.dir/servo_bus.cpp.o: CMakeFiles/servo_bus.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/servo_bus.dir/servo_bus.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/servo_bus.dir/servo_bus.cpp.o -MF CMakeFiles/servo_bus.dir/servo_bus.cpp.o.d -o CMakeFiles/servo_bus.dir/servo_bus.cpp.o -c /home/mish/develop/so-101-cpp/servo_bus.cpp
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/user/develop/so-101-cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/servo_bus.dir/servo_bus.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/servo_bus.dir/servo_bus.cpp.o -MF CMakeFiles/servo_bus.dir/servo_bus.cpp.o.d -o CMakeFiles/servo_bus.dir/servo_bus.cpp.o -c /home/user/develop/so-101-cpp/servo_bus.cpp
 
 CMakeFiles/servo_bus.dir/servo_bus.cpp.i: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/servo_bus.dir/servo_bus.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/mish/develop/so-101-cpp/servo_bus.cpp > CMakeFiles/servo_bus.dir/servo_bus.cpp.i
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/user/develop/so-101-cpp/servo_bus.cpp > CMakeFiles/servo_bus.dir/servo_bus.cpp.i
 
 CMakeFiles/servo_bus.dir/servo_bus.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/servo_bus.dir/servo_bus.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/mish/develop/so-101-cpp/servo_bus.cpp -o CMakeFiles/servo_bus.dir/servo_bus.cpp.s
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/user/develop/so-101-cpp/servo_bus.cpp -o CMakeFiles/servo_bus.dir/servo_bus.cpp.s
 
 # Object files for target servo_bus
 servo_bus_OBJECTS = \
@@ -93,7 +93,7 @@ servo_bus_EXTERNAL_OBJECTS =
 libservo_bus.a: CMakeFiles/servo_bus.dir/servo_bus.cpp.o
 libservo_bus.a: CMakeFiles/servo_bus.dir/build.make
 libservo_bus.a: CMakeFiles/servo_bus.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX static library libservo_bus.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/user/develop/so-101-cpp/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX static library libservo_bus.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/servo_bus.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/servo_bus.dir/link.txt --verbose=$(VERBOSE)
 
@@ -106,6 +106,6 @@ CMakeFiles/servo_bus.dir/clean:
 .PHONY : CMakeFiles/servo_bus.dir/clean
 
 CMakeFiles/servo_bus.dir/depend:
-	cd /home/mish/develop/so-101-cpp/build && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/mish/develop/so-101-cpp /home/mish/develop/so-101-cpp /home/mish/develop/so-101-cpp/build /home/mish/develop/so-101-cpp/build /home/mish/develop/so-101-cpp/build/CMakeFiles/servo_bus.dir/DependInfo.cmake "--color=$(COLOR)"
+	cd /home/user/develop/so-101-cpp/build && $(CMAKE_COMMAND) -E cmake_depends "Unix Makefiles" /home/user/develop/so-101-cpp /home/user/develop/so-101-cpp /home/user/develop/so-101-cpp/build /home/user/develop/so-101-cpp/build /home/user/develop/so-101-cpp/build/CMakeFiles/servo_bus.dir/DependInfo.cmake "--color=$(COLOR)"
 .PHONY : CMakeFiles/servo_bus.dir/depend
 

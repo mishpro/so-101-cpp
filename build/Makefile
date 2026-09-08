@@ -57,10 +57,10 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/mish/develop/so-101-cpp
+CMAKE_SOURCE_DIR = /home/user/develop/so-101-cpp
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/mish/develop/so-101-cpp/build
+CMAKE_BINARY_DIR = /home/user/develop/so-101-cpp/build
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -87,9 +87,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/mish/develop/so-101-cpp/build/CMakeFiles /home/mish/develop/so-101-cpp/build//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/user/develop/so-101-cpp/build/CMakeFiles /home/user/develop/so-101-cpp/build//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/mish/develop/so-101-cpp/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/user/develop/so-101-cpp/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -179,6 +179,30 @@ base_angle.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/base_angle.dir/build.make CMakeFiles/base_angle.dir/base_angle.cpp.s
 .PHONY : base_angle.cpp.s
 
+cartesian_ik.o: cartesian_ik.cpp.o
+.PHONY : cartesian_ik.o
+
+# target to build an object file
+cartesian_ik.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/cartesian_ik.cpp.o
+.PHONY : cartesian_ik.cpp.o
+
+cartesian_ik.i: cartesian_ik.cpp.i
+.PHONY : cartesian_ik.i
+
+# target to preprocess a source file
+cartesian_ik.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/cartesian_ik.cpp.i
+.PHONY : cartesian_ik.cpp.i
+
+cartesian_ik.s: cartesian_ik.cpp.s
+.PHONY : cartesian_ik.s
+
+# target to generate assembly for a file
+cartesian_ik.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/cartesian_ik.cpp.s
+.PHONY : cartesian_ik.cpp.s
+
 send.o: send.cpp.o
 .PHONY : send.o
 
@@ -241,6 +265,9 @@ help:
 	@echo "... base_angle.o"
 	@echo "... base_angle.i"
 	@echo "... base_angle.s"
+	@echo "... cartesian_ik.o"
+	@echo "... cartesian_ik.i"
+	@echo "... cartesian_ik.s"
 	@echo "... send.o"
 	@echo "... send.i"
 	@echo "... send.s"

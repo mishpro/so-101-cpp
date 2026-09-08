@@ -1,6 +1,6 @@
 CMakeFiles/servo_bus.dir/servo_bus.cpp.o: \
- /home/mish/develop/so-101-cpp/servo_bus.cpp /usr/include/stdc-predef.h \
- /home/mish/develop/so-101-cpp/servo_bus.hpp /usr/include/c++/13/cstdint \
+ /home/user/develop/so-101-cpp/servo_bus.cpp /usr/include/stdc-predef.h \
+ /home/user/develop/so-101-cpp/servo_bus.hpp /usr/include/c++/13/cstdint \
  /usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/os_defines.h \
  /usr/include/features.h /usr/include/features-time64.h \

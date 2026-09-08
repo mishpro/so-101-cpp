@@ -8,7 +8,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/mish/develop/so-101-cpp/servo_bus.cpp" "CMakeFiles/servo_bus.dir/servo_bus.cpp.o" "gcc" "CMakeFiles/servo_bus.dir/servo_bus.cpp.o.d"
+  "/home/user/develop/so-101-cpp/servo_bus.cpp" "CMakeFiles/servo_bus.dir/servo_bus.cpp.o" "gcc" "CMakeFiles/servo_bus.dir/servo_bus.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

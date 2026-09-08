@@ -1,4 +1,6 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/send.dir/cartesian_ik.cpp.o"
+  "CMakeFiles/send.dir/cartesian_ik.cpp.o.d"
   "CMakeFiles/send.dir/send.cpp.o"
   "CMakeFiles/send.dir/send.cpp.o.d"
   "send"
