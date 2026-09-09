@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(nlohmann_json REQUIRED)
+find_package(pinocchio REQUIRED)
 
 
 add_library(servo_bus servo_bus.cpp)
@@ -17,5 +18,9 @@ target_link_libraries(base_angle PRIVATE servo_bus)
 
 add_executable(send send.cpp)
 target_link_libraries(send PRIVATE servo_bus)
+
+add_executable(cartesian_control cartesian_control.cpp)
+target_link_libraries(cartesian_control PRIVATE servo_bus pinocchio::pinocchio)
+
 configure_file(send_config.json send_config.json COPYONLY)
 

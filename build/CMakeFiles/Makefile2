@@ -66,6 +66,7 @@ CMAKE_BINARY_DIR = /home/mish/develop/so-101-cpp/build
 all: CMakeFiles/servo_bus.dir/all
 all: CMakeFiles/base_angle.dir/all
 all: CMakeFiles/send.dir/all
+all: CMakeFiles/cartesian_control.dir/all
 .PHONY : all
 
 # The main recursive "preinstall" target.
@@ -76,6 +77,7 @@ preinstall:
 clean: CMakeFiles/servo_bus.dir/clean
 clean: CMakeFiles/base_angle.dir/clean
 clean: CMakeFiles/send.dir/clean
+clean: CMakeFiles/cartesian_control.dir/clean
 .PHONY : clean
 
 #=============================================================================
@@ -85,7 +87,7 @@ clean: CMakeFiles/send.dir/clean
 CMakeFiles/servo_bus.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/servo_bus.dir/build.make CMakeFiles/servo_bus.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/servo_bus.dir/build.make CMakeFiles/servo_bus.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=5,6 "Built target servo_bus"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=7,8 "Built target servo_bus"
 .PHONY : CMakeFiles/servo_bus.dir/all
 
 # Build rule for subdir invocation for target.
@@ -137,7 +139,7 @@ CMakeFiles/base_angle.dir/clean:
 CMakeFiles/send.dir/all: CMakeFiles/servo_bus.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=3,4 "Built target send"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=5,6 "Built target send"
 .PHONY : CMakeFiles/send.dir/all
 
 # Build rule for subdir invocation for target.
@@ -155,6 +157,32 @@ send: CMakeFiles/send.dir/rule
 CMakeFiles/send.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/clean
 .PHONY : CMakeFiles/send.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/cartesian_control.dir
+
+# All Build rule for target.
+CMakeFiles/cartesian_control.dir/all: CMakeFiles/servo_bus.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/mish/develop/so-101-cpp/build/CMakeFiles --progress-num=3,4 "Built target cartesian_control"
+.PHONY : CMakeFiles/cartesian_control.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/cartesian_control.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/mish/develop/so-101-cpp/build/CMakeFiles 4
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/cartesian_control.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/mish/develop/so-101-cpp/build/CMakeFiles 0
+.PHONY : CMakeFiles/cartesian_control.dir/rule
+
+# Convenience name for target.
+cartesian_control: CMakeFiles/cartesian_control.dir/rule
+.PHONY : cartesian_control
+
+# clean rule for target.
+CMakeFiles/cartesian_control.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/clean
+.PHONY : CMakeFiles/cartesian_control.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

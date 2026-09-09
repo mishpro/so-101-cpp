@@ -155,6 +155,19 @@ send/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/send.dir/build.make CMakeFiles/send.dir/build
 .PHONY : send/fast
 
+#=============================================================================
+# Target rules for targets named cartesian_control
+
+# Build rule for target.
+cartesian_control: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cartesian_control
+.PHONY : cartesian_control
+
+# fast build rule for target.
+cartesian_control/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/build
+.PHONY : cartesian_control/fast
+
 base_angle.o: base_angle.cpp.o
 .PHONY : base_angle.o
 
@@ -178,6 +191,30 @@ base_angle.s: base_angle.cpp.s
 base_angle.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/base_angle.dir/build.make CMakeFiles/base_angle.dir/base_angle.cpp.s
 .PHONY : base_angle.cpp.s
+
+cartesian_control.o: cartesian_control.cpp.o
+.PHONY : cartesian_control.o
+
+# target to build an object file
+cartesian_control.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/cartesian_control.cpp.o
+.PHONY : cartesian_control.cpp.o
+
+cartesian_control.i: cartesian_control.cpp.i
+.PHONY : cartesian_control.i
+
+# target to preprocess a source file
+cartesian_control.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/cartesian_control.cpp.i
+.PHONY : cartesian_control.cpp.i
+
+cartesian_control.s: cartesian_control.cpp.s
+.PHONY : cartesian_control.s
+
+# target to generate assembly for a file
+cartesian_control.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cartesian_control.dir/build.make CMakeFiles/cartesian_control.dir/cartesian_control.cpp.s
+.PHONY : cartesian_control.cpp.s
 
 send.o: send.cpp.o
 .PHONY : send.o
@@ -236,11 +273,15 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... base_angle"
+	@echo "... cartesian_control"
 	@echo "... send"
 	@echo "... servo_bus"
 	@echo "... base_angle.o"
 	@echo "... base_angle.i"
 	@echo "... base_angle.s"
+	@echo "... cartesian_control.o"
+	@echo "... cartesian_control.i"
+	@echo "... cartesian_control.s"
 	@echo "... send.o"
 	@echo "... send.i"
 	@echo "... send.s"

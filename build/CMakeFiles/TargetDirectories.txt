@@ -1,5 +1,6 @@
 /home/mish/develop/so-101-cpp/build/CMakeFiles/servo_bus.dir
 /home/mish/develop/so-101-cpp/build/CMakeFiles/base_angle.dir
 /home/mish/develop/so-101-cpp/build/CMakeFiles/send.dir
+/home/mish/develop/so-101-cpp/build/CMakeFiles/cartesian_control.dir
 /home/mish/develop/so-101-cpp/build/CMakeFiles/edit_cache.dir
 /home/mish/develop/so-101-cpp/build/CMakeFiles/rebuild_cache.dir
