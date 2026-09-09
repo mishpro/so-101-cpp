@@ -25,7 +25,6 @@ using json = nlohmann::json;
 
 constexpr int kServoCount = 6;
 constexpr int kArmJointCount = 5;
-constexpr double kDamping = 1e-4;
 constexpr char kArmJointNames[kArmJointCount][14] = {
     "shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex",
     "wrist_roll"};
@@ -33,9 +32,14 @@ constexpr char kArmJointNames[kArmJointCount][14] = {
 struct ControlConfig {
     std::string port;
     std::string urdf_path;
+    std::string end_effector;
     uint16_t speed;
     float joint_speed_divisor;
     double cartesian_step_m;
+    double ik_damping;
+    int ik_max_iterations;
+    double ik_position_tolerance_m;
+    double ik_max_joint_step_rad;
 };
 
 std::string expand_home(const std::string& path) {
@@ -52,16 +56,31 @@ bool load_config(const std::string& path, ControlConfig& config) {
         const json data = json::parse(file);
         config.port = data.at("port").get<std::string>();
         config.urdf_path = expand_home(data.at("urdf_path").get<std::string>());
+        config.end_effector =
+            data.at("end_effector").get<std::string>();
         const unsigned int speed = data.at("speed").get<unsigned int>();
         config.speed = static_cast<uint16_t>(speed);
         config.joint_speed_divisor =
             data.at("joint_speed_divisor").get<float>();
         config.cartesian_step_m = data.at("cartesian_step_m").get<double>();
-        return !config.port.empty() && speed >= 1 && speed <= 1000 &&
+        config.ik_damping = data.at("ik_damping").get<double>();
+        config.ik_max_iterations = data.at("ik_max_iterations").get<int>();
+        config.ik_position_tolerance_m =
+            data.at("ik_position_tolerance_m").get<double>();
+        config.ik_max_joint_step_rad =
+            data.at("ik_max_joint_step_rad").get<double>();
+        return !config.port.empty() && !config.end_effector.empty() &&
+               speed >= 1 && speed <= 1000 &&
                std::isfinite(config.joint_speed_divisor) &&
                config.joint_speed_divisor > 0.0f &&
                std::isfinite(config.cartesian_step_m) &&
-               config.cartesian_step_m > 0.0;
+               config.cartesian_step_m > 0.0 &&
+               std::isfinite(config.ik_damping) && config.ik_damping > 0.0 &&
+               config.ik_max_iterations >= 1 &&
+               std::isfinite(config.ik_position_tolerance_m) &&
+               config.ik_position_tolerance_m > 0.0 &&
+               std::isfinite(config.ik_max_joint_step_rad) &&
+               config.ik_max_joint_step_rad > 0.0;
     } catch (const std::exception&) {
         return false;
     }
@@ -201,7 +220,7 @@ void control_cartesian(int serial_fd, const ServoLimits limits[kServoCount],
                        pinocchio::Data& data,
                        const std::vector<pinocchio::JointIndex>& joints) {
     const pinocchio::FrameIndex frame_id =
-        model.getFrameId("gripper_frame_link");
+        model.getFrameId(config.end_effector);
     Eigen::VectorXd q = pinocchio::neutral(model);
     float gripper_angle = 0.0f;
     std::vector<float> current_angles;
@@ -218,7 +237,8 @@ void control_cartesian(int serial_fd, const ServoLimits limits[kServoCount],
     Eigen::Vector3d target = data.oMf[frame_id].translation();
     pinocchio::Data::Matrix6x jacobian(6, model.nv);
 
-    std::cout << "\nCartesian SO-101 control at gripper_frame_link\n"
+    std::cout << "\nCartesian SO-101 control at "
+              << config.end_effector << "\n"
               << "[T/G] X forward/back, [A/D] Y left/right, [W/S] Z up/down\n"
               << "[Q] quit, step: " << config.cartesian_step_m << " m\n"
               << "Target: " << target.transpose() << std::endl;
@@ -248,36 +268,58 @@ void control_cartesian(int serial_fd, const ServoLimits limits[kServoCount],
         // суставов со скоростью крайней точки.
         pinocchio::forwardKinematics(model, data, q);
         pinocchio::updateFramePlacements(model, data);
-        pinocchio::computeFrameJacobian(model, data, q, frame_id,
-                                        pinocchio::ReferenceFrame::WORLD,
-                                        jacobian);
         const Eigen::Vector3d current_xyz = data.oMf[frame_id].translation();
-        const Eigen::Vector3d error = target - current_xyz;
-        Eigen::MatrixXd arm_jacobian(3, joints.size());
-        for (size_t index = 0; index < joints.size(); ++index) {
-            // Берём только линейные строки якобиана и только пять суставов
-            // руки; вращение и gripper в расчёте положения не используются.
-            arm_jacobian.col(index) =
-                jacobian.topRows(3).col(model.joints[joints[index]].idx_v());
-        }
+        const double initial_error = (target - current_xyz).norm();
+        double final_error = initial_error;
 
-        // Damped Least Squares: получаем приращения q, которые приближают
-        // gripper к target и остаются устойчивыми около вырожденных поз.
-        Eigen::Matrix3d system = arm_jacobian * arm_jacobian.transpose();
-        system += kDamping * kDamping * Eigen::Matrix3d::Identity();
-        const Eigen::VectorXd dq_arm = arm_jacobian.transpose() *
-                                       system.ldlt().solve(error);
-        Eigen::VectorXd dq = Eigen::VectorXd::Zero(model.nv);
-        for (size_t index = 0; index < joints.size(); ++index) {
-            dq[model.joints[joints[index]].idx_v()] = dq_arm[index];
-        }
-        // integrate корректно обновляет конфигурацию Pinocchio с учётом
-        // представления суставов. После этого ограничиваем q диапазонами URDF.
-        q = pinocchio::integrate(model, q, dq);
-        for (const auto joint_id : joints) {
-            const int q_index = model.joints[joint_id].idx_q();
-            q[q_index] = std::clamp(q[q_index], model.lowerPositionLimit[q_index],
-                                    model.upperPositionLimit[q_index]);
+        // Несколько итераций Damped Least Squares позволяют приблизить
+        // конечную точку к цели точнее, чем один шаг на нажатие клавиши.
+        for (int iteration = 0;
+             iteration < config.ik_max_iterations &&
+             final_error > config.ik_position_tolerance_m;
+             ++iteration) {
+            pinocchio::computeFrameJacobian(model, data, q, frame_id,
+                                            pinocchio::ReferenceFrame::WORLD,
+                                            jacobian);
+            const Eigen::Vector3d error =
+                target - data.oMf[frame_id].translation();
+            Eigen::MatrixXd arm_jacobian(3, joints.size());
+            for (size_t index = 0; index < joints.size(); ++index) {
+                // Берём только линейные строки якобиана и только пять суставов
+                // руки; вращение и gripper в расчёте положения не используются.
+                arm_jacobian.col(index) = jacobian.topRows(3).col(
+                    model.joints[joints[index]].idx_v());
+            }
+
+            // Damped Least Squares устойчив к вырожденным положениям
+            // якобиана. Величина damping приходит из конфигурации.
+            Eigen::Matrix3d system = arm_jacobian * arm_jacobian.transpose();
+            system += config.ik_damping * config.ik_damping *
+                      Eigen::Matrix3d::Identity();
+            const Eigen::VectorXd dq_arm = arm_jacobian.transpose() *
+                                           system.ldlt().solve(error);
+            Eigen::VectorXd dq = Eigen::VectorXd::Zero(model.nv);
+            for (size_t index = 0; index < joints.size(); ++index) {
+                const double limited_step = std::clamp(
+                    dq_arm[index], -config.ik_max_joint_step_rad,
+                    config.ik_max_joint_step_rad);
+                dq[model.joints[joints[index]].idx_v()] = limited_step;
+            }
+
+            // integrate обновляет конфигурацию Pinocchio. После каждой
+            // итерации ограничиваем суставы диапазонами из URDF.
+            q = pinocchio::integrate(model, q, dq);
+            for (const auto joint_id : joints) {
+                const int q_index = model.joints[joint_id].idx_q();
+                q[q_index] = std::clamp(
+                    q[q_index], model.lowerPositionLimit[q_index],
+                    model.upperPositionLimit[q_index]);
+            }
+
+            pinocchio::forwardKinematics(model, data, q);
+            pinocchio::updateFramePlacements(model, data);
+            final_error =
+                (target - data.oMf[frame_id].translation()).norm();
         }
 
         const std::vector<float> target_angles = configuration_to_servo_angles(
@@ -297,7 +339,7 @@ void control_cartesian(int serial_fd, const ServoLimits limits[kServoCount],
         std::cout << "Current XYZ [m]: [" << current_xyz.transpose() << "]\n";
         print_angles("Target angles", target_angles);
         std::cout << "Target XYZ [m]: [" << target.transpose() << "]\n"
-                  << "IK error before [m]: " << error.norm() << "\n"
+                  << "IK error before [m]: " << initial_error << "\n"
                   << "IK error after  [m]: " << ik_error.norm() << std::endl;
     }
 }
@@ -313,15 +355,16 @@ int main() {
     pinocchio::Model model;
     try {
         // buildModel строит кинематическую модель SO-101 из URDF, включая
-        // ограничения суставов и frame gripper_frame_link.
+        // ограничения суставов и настроенный end-effector frame.
         pinocchio::urdf::buildModel(config.urdf_path, model);
     } catch (const std::exception& error) {
         std::cerr << "Failed to build Pinocchio model: " << error.what()
                   << std::endl;
         return 1;
     }
-    if (!model.existFrame("gripper_frame_link")) {
-        std::cerr << "URDF does not contain gripper_frame_link" << std::endl;
+    if (!model.existFrame(config.end_effector)) {
+        std::cerr << "URDF does not contain configured end-effector frame: "
+                  << config.end_effector << std::endl;
         return 1;
     }
 
