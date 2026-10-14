@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <exception>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -172,90 +173,93 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    int serial_fd = configure_serial_port(port.c_str());
-    if (serial_fd < 0) return 1;
+    try {
+        SerialPort port_handle(port);
 
-    ServoLimits limits[6]{};
-    if (!load_or_read_servo_limits(serial_fd, "servo_limits.json", limits)) {
-        close(serial_fd);
-        return 1;
-    }
-
-    std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
-
-    if (show_limits) {
-        std::cout << "Joint | min degrees | max degrees | min step | max step"
-                  << std::endl;
-        std::cout << "------+-------------+-------------+----------+---------"
-                  << std::endl;
-        std::cout << std::fixed << std::setprecision(2);
-        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-            const ServoLimits& joint_limits = limits[joint_id - 1];
-            const float max_angle =
-                static_cast<float>(joint_limits.max_position -
-                                   joint_limits.min_position) *
-                (360.0f / 4095.0f);
-            std::cout << std::setw(5) << static_cast<int>(joint_id) << " | "
-                      << std::setw(11) << 0.0f << " | "
-                      << std::setw(11) << max_angle << " | "
-                      << std::setw(8) << joint_limits.min_position << " | "
-                      << std::setw(8) << joint_limits.max_position << std::endl;
+        ServoLimits limits[6]{};
+        if (!load_or_read_servo_limits(port_handle.fd(), "servo_limits.json",
+                                        limits)) {
+            return 1;
         }
-        close(serial_fd);
-        return 0;
-    }
 
-    if (disable_torque) {
+        std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
+
+        if (show_limits) {
+            std::cout << "Joint | min degrees | max degrees | min step | max step"
+                      << std::endl;
+            std::cout << "------+-------------+-------------+----------+---------"
+                      << std::endl;
+            std::cout << std::fixed << std::setprecision(2);
+            for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+                const ServoLimits& joint_limits = limits[joint_id - 1];
+                const float max_angle =
+                    static_cast<float>(joint_limits.max_position -
+                                       joint_limits.min_position) *
+                    (360.0f / 4095.0f);
+                std::cout << std::setw(5) << static_cast<int>(joint_id) << " | "
+                          << std::setw(11) << 0.0f << " | "
+                          << std::setw(11) << max_angle << " | "
+                          << std::setw(8) << joint_limits.min_position << " | "
+                          << std::setw(8) << joint_limits.max_position << std::endl;
+            }
+            return 0;
+        }
+
+        if (disable_torque) {
+            bool all_commands_succeeded = true;
+            for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+                if (!disable_servo_torque(port_handle.fd(), joint_id)) {
+                    all_commands_succeeded = false;
+                }
+                usleep(10000);
+            }
+            return all_commands_succeeded ? 0 : 1;
+        }
+
+        if (set_middle) {
+            for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+                const ServoLimits& joint_limits = limits[joint_id - 1];
+                const float middle_angle =
+                    static_cast<float>(joint_limits.max_position -
+                                       joint_limits.min_position) *
+                    (180.0f / 4095.0f);
+                commands.emplace_back(joint_id, middle_angle);
+            }
+        }
+
+        if (set_base) {
+            constexpr float base_positions[] = {
+                0.5f, 0.0f, 1.0f, 0.75f, 0.5f, 0.0f
+            };
+            for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
+                const ServoLimits& joint_limits = limits[joint_id - 1];
+                const float range_degrees =
+                    static_cast<float>(joint_limits.max_position -
+                                       joint_limits.min_position) *
+                    (360.0f / 4095.0f);
+                commands.emplace_back(
+                    joint_id, range_degrees * base_positions[joint_id - 1]);
+            }
+        }
+
         bool all_commands_succeeded = true;
-        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-            if (!disable_servo_torque(serial_fd, joint_id)) {
+        for (const auto& command : commands) {
+            const float speed_divisor =
+                std::pow(config.joint_speed_divisor, command.first - 1);
+            const uint16_t joint_speed = std::max<uint16_t>(
+                1, static_cast<uint16_t>(speed / speed_divisor));
+            if (!write_joint_angle(port_handle.fd(), command.first, command.second,
+                                   joint_speed, limits[command.first - 1])) {
                 all_commands_succeeded = false;
             }
             usleep(10000);
         }
-        close(serial_fd);
+
         return all_commands_succeeded ? 0 : 1;
+    } catch (const std::exception& exception) {
+        std::cerr << exception.what() << std::endl;
+        return 1;
     }
 
-    if (set_middle) {
-        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-            const ServoLimits& joint_limits = limits[joint_id - 1];
-            const float middle_angle =
-                static_cast<float>(joint_limits.max_position -
-                                   joint_limits.min_position) *
-                (180.0f / 4095.0f);
-            commands.emplace_back(joint_id, middle_angle);
-        }
-    }
-
-    if (set_base) {
-        constexpr float base_positions[] = {
-            0.5f, 0.0f, 1.0f, 0.75f, 0.5f, 0.0f
-        };
-        for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-            const ServoLimits& joint_limits = limits[joint_id - 1];
-            const float range_degrees =
-                static_cast<float>(joint_limits.max_position -
-                                   joint_limits.min_position) *
-                (360.0f / 4095.0f);
-            commands.emplace_back(
-                joint_id, range_degrees * base_positions[joint_id - 1]);
-        }
-    }
-
-    bool all_commands_succeeded = true;
-    for (const auto& command : commands) {
-        const float speed_divisor =
-            std::pow(config.joint_speed_divisor, command.first - 1);
-        const uint16_t joint_speed = std::max<uint16_t>(
-            1, static_cast<uint16_t>(speed / speed_divisor));
-        if (!write_joint_angle(serial_fd, command.first, command.second,
-                               joint_speed, limits[command.first - 1])) {
-            all_commands_succeeded = false;
-        }
-        usleep(10000);
-    }
-
-    close(serial_fd);
-    return all_commands_succeeded ? 0 : 1;
+    return 0;
 }

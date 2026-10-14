@@ -1,42 +1,121 @@
 # so-101-cpp
 Manipulation tasks @ SO101 Robot Arm
 
-## Cartesian control
-
-Build and run the keyboard Cartesian controller:
+## Сборка
 
 ```sh
 cmake -S . -B build
-cmake --build build --target cartesian_control
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+python3 tests/manual/pty_smoke_test.py   # прогон на псевдо-порту, без робота
+```
+
+`ctest` проверяет преобразование углов, границы URDF, валидацию конфига и сам
+решатель IK — всё это нужно только из URDF, робот не требуется. Скрипт с
+псевдо-портом дополнительно проверяет, что программа доходит до чтения
+сервоприводов при согласованных границах и отказывается работать, когда
+границы разошлись.
+
+Тип сборки по умолчанию — `RelWithDebInfo`: без явного `CMAKE_BUILD_TYPE` CMake
+не добавляет флагов оптимизации вовсе, и итерации решателя считаются в `-O0`.
+
+Полезные опции: `-DSO101_WERROR=ON` (предупреждения как ошибки),
+`-DSO101_SANITIZER=undefined` (UBSan). Значение `address` (ASan) выбрать нельзя:
+Eigen отключает свой fast-path malloc при `__SANITIZE_ADDRESS__`, поэтому
+ASan-инструментированный код освобождает память иначе, чем prebuilt
+`libpinocchio_parsers.so` её выделяет, и любой `buildModel` даёт ложное
+срабатывание. Воспроизводится программой из пяти строк.
+
+## Границы суставов: URDF как единый источник
+
+`so101_irs_ksant.urdf` — копия `so101_new_calib.urdf`, в которой границы всех
+шести суставов взяты из калибровки конкретного экземпляра робота
+(`servo_limits.json`). Границы — единственный источник знаний об углах: их
+берут и Pinocchio, и преобразование «градусы мотора ↔ радианы».
+
+```sh
+python3 tools/sync_urdf_limits.py            # исходный URDF и servo_limits.json
+```
+
+Скрипт переносит `min`/`max` моторов в `lower`/`upper` блоков `<limit>` по
+формуле `upper = lower + (max − min)·2π/4095` — той же, по которой
+`servo_bus.cpp` переводит отсчёты в градусы. `lower` сохраняется, поэтому
+соответствие «минимум мотора ↔ lower» не меняется и робот при переходе не
+прыгает. Соответствие «servo id ↔ сустав» скрипт читает из блоков
+`<transmission>` самого URDF, а не дублирует.
+
+Перегенерировать нужно **только** если `servo_limits.json` изменился: это
+единственный случай, когда границы перестают описывать реальность.
+`cartesian_control` при старте сверяет границы URDF с калибровкой и отказывается
+работать при расхождении больше 0.5°.
+
+## Cartesian control
+
+```sh
 ./build/cartesian_control
 ```
 
-The controller reads `send_config.json`, loads the configured URDF with
-Pinocchio, and uses `gripper_frame_link` as the Cartesian target. It reads the
-current servo positions before starting, so the initial target matches the
-physical robot. The target frame is configured by `end_effector` in
-`send_config.json`, so another URDF frame can be selected without changing the
-source code.
+Читает `send_config.json`, грузит URDF через Pinocchio и использует как цель
+`gripper_frame_link` (настраивается полем `end_effector`). Перед стартом читает
+текущие положения сервоприводов, поэтому начальная цель совпадает с реальной
+позой и запуска не вызывает скачка.
 
-IK tuning is configured in the same file: `ik_damping` controls numerical
-stability, `ik_max_iterations` limits iterations per key press,
-`ik_position_tolerance_m` is the Cartesian stopping tolerance, and
-`ik_max_joint_step_rad` limits one joint update.
+Клавиши: `T/G` — вдоль X, `A/D` — вдоль Y, `W/S` — вдоль Z, `Q` — выход.
+Каждое нажатие сдвигает цель на `cartesian_step_m` и отправляет углы всех шести
+сервоприводов.
 
-Keyboard controls: `T/G` move along X, `A/D` along Y, `W/S` along Z, and `Q`
-exits. Each key press moves the target by `cartesian_step_m` and sends the
-resulting five arm joint angles through the configured serial port. The
-gripper joint is held at its current position.
+**В IK входят только четыре сустава**: `shoulder_pan`, `shoulder_lift`,
+`elbow_flex`, `wrist_flex` — якобиан 3×4. `wrist_roll` и `gripper` не
+участвуют и остаются там, где их оставил оператор:
 
-{
-  "port": "/dev/ttyACM0",
-  "speed": 600,
-  "joint_speed_divisor": 1.2,
-  "urdf_path": "~/develop/urdf/so101_new_calib.urdf",
-  "cartesian_step_m": 0.01, // размер перемещения целевой точки при нажатии клавиши
-  "end_effector": "gripper_frame_link", // frame, относительно которого считается Cartesian-положение
-  "ik_damping": 0.0001, // 1e-5 ... 1e-2 меньшее значение — выше точность около нормальных поз, но хуже устойчивость около сингулярностей; большее значение — устойчивее расчёт, но движение менее точное и более «мягкое».
-  "ik_max_iterations": 100, // число итераций IK на одно нажатие клавиши
-  "ik_position_tolerance_m": 0.005, // критерий остановки, например ошибка менее 1 мм
-  "ik_max_joint_step_rad": 0.1 // ограничение изменения одного сустава за одну итерацию. Защищает от резких движений
-}
+- `gripper` — челюсть захвата. Она находится ниже `gripper_frame_link` по
+  дереву кинематики, поэтому её столбец в якобиане тождественно нулевой и
+  в позиционную задачу она не может входить физически.
+- `wrist_roll` сидит почти на оси TCP: плечо 7.9 мм/рад против 150–350 мм/рад
+  у остальных. В позиционной задаче он бесполезен, а минимально нормированный
+  DLS всё равно даёт ему ненулевой `dq`, и поворот накапливается от нажатия к
+  нажатию. Управляется отдельно: `./build/send -j5 <градусы>`.
+
+Из-за этого **поворот кисти смещает точку `gripper_frame_link`** (до ~16 мм на
+всём ходу). `cartesian_control` перечитывает сервоприводы перед каждым
+решением, поэтому такая команда учитывается, но накопленная ошибка будет
+закрываться остальными четырьмя суставами.
+
+Из оставшихся 4 суставов при задаче из 3 строк есть одна степень свободы
+(локоть вверх/вниз); она разрешается минимальной нормой DLS. Для явного
+управления осанкой нужен член в нуль-пространстве — это отдельная задача.
+
+### Настройка IK
+
+Все параметры живут в `send_config.json`:
+
+| поле | смысл |
+|---|---|
+| `cartesian_step_m` | смещение цели на нажатие клавиши |
+| `end_effector` | фрейм-цель в URDF |
+| `ik_damping` | демпфирование DLS, 1e-5 … 1e-2 |
+| `ik_max_iterations` | предел итераций на одно нажатие |
+| `ik_position_tolerance_m` | критерий остановки по позиции |
+| `ik_max_joint_step_rad` | предел суммарного изменения суставов за итерацию |
+
+Комментарии в JSON не поддерживаются: `json::parse` их отвергает.
+
+## Про якобиан
+
+Якобиан фрейма берётся вызовом `computeJointJacobians` + `getFrameJacobian`,
+а **не** `computeFrameJacobian`. В pinocchio 4.1.0 последний возвращает матрицу,
+не совпадающую с производной прямой кинематики (нормы колонок расходились
+вплоть до восьми раз), и решатель уходил от цели. Расхождение проверяется
+тестом `test_frame_jacobian_matches_finite_differences` — не вернуться.
+
+## Структура
+
+| файл | что в нём |
+|---|---|
+| `servo_bus.*` | транспорт по tty, чтение/запись сервоприводов, `SerialPort` |
+| `arm_model.*` | модель Pinocchio, соответствие servo ↔ сустав, пересчёт углов, проверка границ, `solve_ik` |
+| `control_config.*` | чтение и валидация `send_config.json` |
+| `cartesian_control.cpp` | клавиатурное Cartesian-управление |
+| `send.cpp`, `base_angle.cpp` | ручное управление суставами, чтение углов |
+| `tools/sync_urdf_limits.py` | генерация URDF с границами из калибровки |
+| `tests/` | проверки без робота: `ctest` (только URDF) и `manual/pty_smoke_test.py` (псевдо-порт) |

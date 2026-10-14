@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <fstream>
+#include <stdexcept>
 #include <termios.h>
 #include <unistd.h>
 
@@ -92,18 +93,47 @@ bool read_register(int fd, uint8_t servo_id, uint8_t address,
 }
 }
 
+SerialPort::SerialPort(const std::string& port)
+    : fd_(configure_serial_port(port.c_str())) {
+	if (fd_ < 0) {
+		// errno читается сразу: configure_serial_port ничего не меняет после
+		// неудачного open/tcgetattr, но полагаться на это не стоит.
+		throw std::runtime_error("Failed to open serial port " + port + ": " +
+		                         std::strerror(errno));
+	}
+}
+
+SerialPort::~SerialPort() noexcept {
+	if (fd_ >= 0) {
+		close(fd_);
+	}
+}
+
+SerialPort::SerialPort(SerialPort&& other) noexcept : fd_(other.fd_) {
+	other.fd_ = -1;
+}
+
+SerialPort& SerialPort::operator=(SerialPort&& other) noexcept {
+	if (this != &other) {
+		if (fd_ >= 0) {
+			close(fd_);
+		}
+		fd_ = other.fd_;
+		other.fd_ = -1;
+	}
+	return *this;
+}
+
+// Возвращает -1, оставляя errno, если порт недоступен: текст ошибки
+// формирует SerialPort, чтобы не печатать одно и то же дважды.
 int configure_serial_port(const char* port) {
     int fd = open(port, O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
-        std::cerr << "Failed to open serial port " << port << ": "
-                  << std::strerror(errno) << std::endl;
         return -1;
     }
 
     termios tty{};
     if (tcgetattr(fd, &tty) != 0) {
-        std::cerr << "Failed to get terminal attributes: "
-                  << std::strerror(errno) << std::endl;
         close(fd);
         return -1;
     }
@@ -121,8 +151,6 @@ int configure_serial_port(const char* port) {
     tty.c_cc[VTIME] = 1;
 
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        std::cerr << "Failed to set terminal attributes: "
-                  << std::strerror(errno) << std::endl;
         close(fd);
         return -1;
     }

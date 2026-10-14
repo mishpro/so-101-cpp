@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/send.dir/send.cpp.o -o send  libservo_bus.a 
