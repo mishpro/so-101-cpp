@@ -235,15 +235,35 @@ int main() {
 
         SerialPort port(config.port);
 
+        // Границы протокола берём из регистров самих сервоприводов: моторы
+        // считаются верно настроенными, а servo_limits.json — эталонный
+        // снимок, к которому этот инструмент отношения не имеет.
         std::array<ServoLimits, kServoCount> limits{};
-        if (!load_or_read_servo_limits(port.fd(), "servo_limits.json",
-                                       limits.data())) {
+        if (!read_all_servo_limits(port.fd(), limits.data())) {
+            std::cerr << "Failed to read joint limits from the servos"
+                      << std::endl;
             return 1;
         }
+
+        std::ostringstream registers;
+        registers << std::fixed << std::setprecision(2)
+                  << "servo registers [deg]: ";
+        for (std::size_t index = 0; index < kServoCount; ++index) {
+            registers << limits[index].span_degrees() << (index + 1 < kServoCount ? " / " : "");
+        }
+        std::cout << registers.str() << std::endl;
+
+        // URDF — источник истины для углов. Расхождение с регистрами означает,
+        // что моторы перенастроены относительно модели: работаем дальше, но
+        // говорим об этом.
         if (!so101::check_joint_limits(arm, limits.data(),
                                        kJointLimitToleranceRad, error)) {
-            std::cerr << error << std::endl;
-            return 1;
+            std::cerr << "\nWarning: servo registers disagree with the URDF: "
+                      << error
+                      << "\n         angles are taken from the URDF; if the arm "
+                         "behaves unexpectedly, re-run "
+                         "tools/sync_urdf_limits.py"
+                      << std::endl;
         }
 
         try {

@@ -90,13 +90,49 @@ void test_limits_check_detects_drift() {
                                      error));
     // В сообщении должно быть имя именно сломанного сустава.
     CHECK(error.find("wrist_roll") != std::string::npos);
-    CHECK(error.find("sync_urdf_limits.py") != std::string::npos);
+    CHECK(error.find("servo registers give") != std::string::npos);
+    CHECK(error.find("URDF says") != std::string::npos);
+
+    // Расхождения накапливаются: видны все, а не только первое.
+    auto two_drifted = reference_limits();
+    two_drifted[4].max_position =
+        static_cast<uint16_t>(two_drifted[4].max_position - 300);
+    two_drifted[2].min_position =
+        static_cast<uint16_t>(two_drifted[2].min_position + 200);
+    CHECK(!so101::check_joint_limits(arm, two_drifted.data(),
+                                     0.5 * kPi / 180.0, error));
+    CHECK(error.find("wrist_roll") != std::string::npos);
+    CHECK(error.find("elbow_flex") != std::string::npos);
+
+    // Сообщение об ошибке пустее, когда всё сошлось.
+    CHECK(so101::check_joint_limits(arm, reference_limits().data(),
+                                    0.5 * kPi / 180.0, error));
+    CHECK(error.empty());
 
     // Пустой диапазон мотора тоже должен ловиться.
     auto empty = reference_limits();
     empty[0].max_position = empty[0].min_position;
     CHECK(!so101::check_joint_limits(arm, empty.data(), 0.5 * kPi / 180.0,
                                      error));
+    CHECK(error.find("empty") != std::string::npos);
+}
+
+// Границы протокола считаются по формуле мотора, а не повторной реализацией:
+// span_degrees() и span в градусах обязаны совпадать.
+void test_servo_span_matches_degrees() {
+    const auto limits = reference_limits();
+    for (std::size_t index = 0; index < kServoCount; ++index) {
+        const double steps = static_cast<double>(limits[index].max_position -
+                                                 limits[index].min_position);
+        CHECK_NEAR(limits[index].span_degrees(), steps * 360.0 / 4095.0, 1e-9);
+        // Обратное преобразование должно возвращать исходный отсчёт.
+        CHECK_NEAR(limits[index].degrees_to_position(
+                       limits[index].span_degrees()),
+                   limits[index].max_position, 1.0);
+        CHECK_NEAR(
+            limits[index].position_to_degrees(limits[index].min_position), 0.0,
+            1e-4);
+    }
 }
 
 void test_angle_roundtrip(const so101::ArmModel& arm) {
@@ -351,6 +387,7 @@ int main() {
     test_ik_joint_set(arm);
     test_limits_match_calibration(arm);
     test_limits_check_detects_drift();
+    test_servo_span_matches_degrees();
     test_angle_roundtrip(arm);
     test_q_to_degrees_clamps(arm);
     test_ik_ignores_wrist_roll(arm);

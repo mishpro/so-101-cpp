@@ -19,9 +19,8 @@ constexpr const char* kServoJointNames[kServoCount] = {
     "wrist_flex",   "wrist_roll",    "gripper",
 };
 
-// Feetech STS3215: угол мотора считается как steps · 360 / 4095. Та же
-// константа, что в servo_bus.cpp, иначе URDF разойдётся с прошивкой.
-constexpr double kCountsPerRevolution = 4095.0;
+// Feetech STS3215: угол мотора считается как steps · 360 / 4095. Константа
+// берётся из servo_bus.hpp — иначе URDF разойдётся с прошивкой.
 
 // M_PI не входит в стандарт C++17, поэтому константа своя.
 constexpr double kPi = 3.14159265358979323846;
@@ -49,9 +48,7 @@ double ArmModel::upper_position_limit(int servo_id) const {
 }
 
 double ArmModel::servo_span_rad(const ServoLimits& limits) const {
-	return (static_cast<double>(limits.max_position) -
-	        static_cast<double>(limits.min_position)) *
-	       2.0 * kPi / kCountsPerRevolution;
+	return static_cast<double>(limits.span_degrees()) * kPi / 180.0;
 }
 
 // С диапазонами URDF, совпадающими с диапазонами моторов (это гарантирует
@@ -116,10 +113,11 @@ bool load_arm_model(const std::string& urdf_path, const std::string& frame_name,
 
 bool check_joint_limits(const ArmModel& arm, const ServoLimits limits[kServoCount],
                         double tolerance_rad, std::string& error) {
+	error.clear();
 	for (std::size_t servo_id = 0; servo_id < kServoCount; ++servo_id) {
 		if (limits[servo_id].max_position <= limits[servo_id].min_position) {
-			error = "Servo limits of joint " + std::to_string(servo_id + 1) +
-			        " are empty";
+			error = "servo register limits of joint " +
+			        std::to_string(servo_id + 1) + " are empty";
 			return false;
 		}
 
@@ -130,17 +128,18 @@ bool check_joint_limits(const ArmModel& arm, const ServoLimits limits[kServoCoun
 		const double servo_span = arm.servo_span_rad(limits[servo_id]);
 		if (std::abs(urdf_span - servo_span) <= tolerance_rad) continue;
 
+		// Расхождения накапливаются: при предупреждении полезно увидеть все
+		// суставы сразу, а не перезапускаться ради каждого по отдельности.
 		std::ostringstream message;
-		message << std::fixed << std::setprecision(2) << "Joint "
-		        << static_cast<int>(servo_id + 1) << " (" << kServoJointNames[servo_id]
-		        << "): URDF range " << urdf_span * 180.0 / kPi
-		        << " deg differs from servo range "
-		        << servo_span * 180.0 / kPi << " deg; regenerate the URDF with "
-		                                             "tools/sync_urdf_limits.py";
-		error = message.str();
-		return false;
+		message << std::fixed << std::setprecision(2) << "joint "
+		        << static_cast<int>(servo_id + 1) << " ("
+		        << kServoJointNames[servo_id] << "): servo registers give "
+		        << servo_span * 180.0 / kPi << " deg, URDF says "
+		        << urdf_span * 180.0 / kPi << " deg";
+		if (!error.empty()) error += "; ";
+		error += message.str();
 	}
-	return true;
+	return error.empty();
 }
 
 IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,

@@ -55,9 +55,10 @@ struct ArmModel {
                                   const std::string& frame_name, ArmModel& arm,
                                   std::string& error);
 
-// Сверяет границы URDF с калибровкой моторов. Расхождение больше tolerance_rad
-// означает, что URDF и servo_limits.json разошлись: такой файл надо пересоздать
-// через tools/sync_urdf_limits.py.
+// Сверяет границы URDF с границами из регистров сервоприводов. URDF —
+// источник истины для углов, поэтому расхождение здесь не повод отказываться
+// работать, а повод предупредить. error заполняется всеми расхождениями
+// сразу, а не только первым.
 [[nodiscard]] bool check_joint_limits(const ArmModel& arm,
                                       const ServoLimits limits[kServoCount],
                                       double tolerance_rad, std::string& error);

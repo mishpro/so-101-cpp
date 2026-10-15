@@ -11,9 +11,10 @@ int main(int argc, char** argv) {
     try {
         SerialPort serial_port(port);
 
+        // Границы берём из регистров моторов, а не из файла: base_angle
+        // ничего не откалибровывает, он просто читает текущие положения.
         ServoLimits limits[6]{};
-        if (!load_or_read_servo_limits(serial_port.fd(), "servo_limits.json",
-                                        limits)) {
+        if (!read_all_servo_limits(serial_port.fd(), limits)) {
             return 1;
         }
 

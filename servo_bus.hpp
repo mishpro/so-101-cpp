@@ -3,9 +3,39 @@
 #include <cstdint>
 #include <string>
 
+// Feetech STS3215 считает угол как steps * 360 / 4095 — именно так, а не через
+// 4096. Константа одна на весь проект, иначе URDF разойдётся с прошивкой.
+// Именно double: во float мантисса обрезается и сверка границ с URDF набирает
+// погрешность порядка 1e-5 градуса.
+inline constexpr double kDegreesPerStep = 360.0 / 4095.0;
+inline constexpr double kStepsPerDegree = 4095.0 / 360.0;
+
+// Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
+// при которых мотор считает себя нулём градусов и концом хода.
 struct ServoLimits {
 	uint16_t min_position;
 	uint16_t max_position;
+
+	// Полный ход мотора в градусах. Считается в double: эта величина
+	// сравнивается с диапазонами URDF, где нужна точность выше, чем даёт float.
+	[[nodiscard]] constexpr double span_degrees() const {
+		return static_cast<double>(max_position - min_position) *
+		       static_cast<double>(kDegreesPerStep);
+	}
+
+	// Градусы мотора для абсолютного отсчёта. Отсчёты вне границ дают
+	// отрицательные или избыточные градусы — это ловит вызывающий код.
+	[[nodiscard]] constexpr double position_to_degrees(uint16_t position) const {
+		return static_cast<double>(position - min_position) *
+		       static_cast<double>(kDegreesPerStep);
+	}
+
+	// Абсолютный отсчёт для угла мотора.
+	[[nodiscard]] constexpr uint16_t degrees_to_position(double degrees) const {
+		return static_cast<uint16_t>(
+		    static_cast<double>(min_position) +
+		    degrees * static_cast<double>(kStepsPerDegree));
+	}
 };
 
 // Владеет файловым дескриптором tty-порта и закрывает его в деструкторе.
@@ -27,11 +57,23 @@ private:
 };
 
 int configure_serial_port(const char* port);
+
+// Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
+// при которых мотор считает себя нулём градусов и концом хода.
+
+// Читает границы одного мотора прямо из его регистров.
 bool read_servo_limits(int fd, uint8_t servo_id, ServoLimits& limits);
+
+// Читает границы всех шести моторов прямо из регистров. Это источник истины
+// для границ протокола: servo_limits.json — лишь эталонный снимок, и программы
+// управления от него не зависят.
+bool read_all_servo_limits(int fd, ServoLimits limits[6]);
+
+// servo_limits.json: эталонный снимок границ. Из него генерируется URDF и по
+// нему проверяется согласованность офлайн, а не управляется роботом.
 bool load_servo_limits(const std::string& path, ServoLimits limits[6]);
 bool save_servo_limits(const std::string& path, const ServoLimits limits[6]);
-bool load_or_read_servo_limits(int fd, const std::string& path,
-							   ServoLimits limits[6]);
+
 bool read_joint_angle(int fd, uint8_t servo_id, const ServoLimits& limits,
 					  float& angle_degrees);
 bool disable_servo_torque(int fd, uint8_t servo_id);

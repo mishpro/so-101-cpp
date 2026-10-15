@@ -161,11 +161,36 @@ int configure_serial_port(const char* port) {
 
 bool read_servo_limits(int fd, uint8_t servo_id, ServoLimits& limits) {
     if (!read_register(fd, servo_id, REG_MIN_POSITION_LIMIT,
-                       limits.min_position) ||
-        !read_register(fd, servo_id, REG_MAX_POSITION_LIMIT,
-                       limits.max_position) ||
-        limits.max_position <= limits.min_position) {
+                       limits.min_position)) {
+        std::cerr << "Joint " << static_cast<int>(servo_id)
+                  << ": failed to read the min position register (0x09)"
+                  << std::endl;
         return false;
+    }
+    if (!read_register(fd, servo_id, REG_MAX_POSITION_LIMIT,
+                       limits.max_position)) {
+        std::cerr << "Joint " << static_cast<int>(servo_id)
+                  << ": failed to read the max position register (0x0B)"
+                  << std::endl;
+        return false;
+    }
+    if (limits.max_position <= limits.min_position) {
+        std::cerr << "Joint " << static_cast<int>(servo_id)
+                  << ": register limits are empty (" << limits.min_position
+                  << ".." << limits.max_position << ")" << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool read_all_servo_limits(int fd, ServoLimits limits[6]) {
+    for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
+        if (!read_servo_limits(fd, servo_id, limits[servo_id - 1])) {
+            std::cerr << "Failed to read register limits from Joint "
+                      << static_cast<int>(servo_id) << std::endl;
+            return false;
+        }
+        usleep(1000);
     }
     return true;
 }
@@ -223,30 +248,6 @@ bool save_servo_limits(const std::string& path, const ServoLimits limits[6]) {
     return file.good();
 }
 
-bool load_or_read_servo_limits(int fd, const std::string& path,
-                               ServoLimits limits[6]) {
-    if (load_servo_limits(path, limits)) return true;
-
-    std::ifstream existing_file(path);
-    if (existing_file) {
-        std::cerr << "Invalid servo limits file: " << path << std::endl;
-        return false;
-    }
-
-    for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
-        if (!read_servo_limits(fd, servo_id, limits[servo_id - 1])) {
-            std::cerr << "Failed to read limits from Joint "
-                      << static_cast<int>(servo_id) << std::endl;
-            return false;
-        }
-    }
-    if (!save_servo_limits(path, limits)) {
-        std::cerr << "Failed to save servo limits to " << path << std::endl;
-        return false;
-    }
-    return true;
-}
-
 bool read_joint_angle(int fd, uint8_t servo_id, const ServoLimits& limits,
                       float& angle_degrees) {
     uint16_t present_position = 0;
@@ -256,15 +257,13 @@ bool read_joint_angle(int fd, uint8_t servo_id, const ServoLimits& limits,
     if (present_position < limits.min_position ||
         present_position > limits.max_position) {
         std::cerr << "Joint " << static_cast<int>(servo_id)
-                  << " position is outside saved limits: " << present_position
-                  << " (limits " << limits.min_position << ".."
-                  << limits.max_position << ")" << std::endl;
+                  << " position is outside servo register limits: "
+                  << present_position << " (limits " << limits.min_position
+                  << ".." << limits.max_position << ")" << std::endl;
         return false;
     }
 
-    const float position_from_min = static_cast<float>(present_position) -
-                                    static_cast<float>(limits.min_position);
-    angle_degrees = position_from_min * (360.0f / 4095.0f);
+    angle_degrees = limits.position_to_degrees(present_position);
     return true;
 }
 
@@ -304,9 +303,7 @@ bool write_joint_angle(int fd, uint8_t servo_id, float angle_degrees,
                        uint16_t speed, const ServoLimits& limits) {
     if (!std::isfinite(angle_degrees) || angle_degrees < 0.0f) return false;
 
-    const float max_angle =
-        static_cast<float>(limits.max_position - limits.min_position) *
-        (360.0f / 4095.0f);
+    const float max_angle = limits.span_degrees();
     if (angle_degrees > max_angle) {
         std::cerr << "Angle " << angle_degrees << " is outside Joint "
                   << static_cast<int>(servo_id) << " range 0.." << max_angle
@@ -314,9 +311,7 @@ bool write_joint_angle(int fd, uint8_t servo_id, float angle_degrees,
         return false;
     }
 
-    const uint16_t steps = static_cast<uint16_t>(
-        static_cast<float>(limits.min_position) +
-        angle_degrees * (4095.0f / 360.0f));
+    const uint16_t steps = limits.degrees_to_position(angle_degrees);
     if (!write_register(fd, servo_id, REG_GOAL_VELOCITY, speed)) {
         std::cerr << "Failed to transmit speed to Joint "
                   << static_cast<int>(servo_id) << std::endl;
