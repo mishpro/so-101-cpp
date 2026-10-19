@@ -235,9 +235,9 @@ int main() {
 
         SerialPort port(config.port);
 
-        // Границы протокола берём из регистров самих сервоприводов: моторы
-        // считаются верно настроенными, а servo_limits.json — эталонный
-        // снимок, к которому этот инструмент отношения не имеет.
+        // Границы протокола берём из регистров самих сервоприводов: файл
+        // калибровки в проекте нет, а диапазон мотора хранится в нём самом.
+        // В URDF те же значения переносит tools/sync_urdf_limits.py.
         std::array<ServoLimits, kServoCount> limits{};
         if (!read_all_servo_limits(port.fd(), limits.data())) {
             std::cerr << "Failed to read joint limits from the servos"

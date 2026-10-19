@@ -2,23 +2,25 @@
 """Ручные сценарии проверки на эмуляторе сервоприводов — без робота.
 
 Поднимает псевдо-порт с эмулятором шести моторов (fake_servo_bus.py) и
-проверяет то, что нельзя проверить обычным ctest: путь инициализации программ.
+проверяет то, что нельзя проверить обычным ctest: путь инициализации программ
+и генератора URDF.
 
 Сценарии:
-  1. регистры совпадают с эталоном — программы стартуют штатно;
-  2. эталонного файла servo_limits.json нет вовсе — программы всё равно
+  1. регистры совпадают с URDF — программы стартуют штатно;
+  2. эталонного файла калибровки в проекте нет вовсе — программы всё равно
      работают, потому что границы берутся из регистров;
   3. регистры расходятся с URDF — печатается предупреждение, работа не
      прекращается (источник истины для углов — URDF);
-  4. send --show-limits показывает оба источника и вердикт о расхождении;
-  5. send --save-limits перезаписывает эталон значениями регистров;
-  6. base_angle читает положения и печатает их в градусах.
+  4. send --show-limits показывает регистры рядом с URDF и вердикт;
+  5. send --show-limits честно отказывается, если URDF недоступен;
+  6. генератор URDF читает границы с шины и перегенерирует файл.
 
 Запуск: python3 tests/manual/pty_smoke_test.py
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import re
@@ -32,7 +34,8 @@ from fake_servo_bus import FakeServoBus  # noqa: E402
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 URDF = pathlib.Path(os.path.expanduser("~/develop/urdf/so101_irs_ksant.urdf"))
-REFERENCE = json.loads((ROOT / "servo_limits.json").read_text())["servos"]
+SOURCE_URDF = pathlib.Path(os.path.expanduser("~/develop/urdf/so101_new_calib.urdf"))
+STEPS_PER_RADIAN = 4095.0 / (2.0 * math.pi)
 
 failures: list[str] = []
 
@@ -46,8 +49,30 @@ def check(condition: bool, description: str, detail: str = "") -> None:
         failures.append(description)
 
 
+def urdf_limits() -> list[tuple[int, int]]:
+    """Выводит диапазоны моторов из span блоков <limit> — как это делает send."""
+    import xml.etree.ElementTree as ElementTree
+
+    root = ElementTree.parse(URDF).getroot()
+    by_name = {
+        joint.get("name"): joint.find("limit")
+        for joint in root.iter("joint")
+        if joint.get("type") == "revolute"
+    }
+    order = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+             "wrist_flex", "wrist_roll", "gripper"]
+    limits = []
+    for name in order:
+        span = float(by_name[name].get("upper")) - float(by_name[name].get("lower"))
+        limits.append((0, round(span * STEPS_PER_RADIAN)))
+    return limits
+
+
+REFERENCE = urdf_limits()
+
+
 def build_config(port: str, urdf: pathlib.Path | None = None) -> str:
-    """Кладёт конфиг и эталон во временный каталог, чтобы не портить сборку."""
+    """Кладёт конфиг во временный каталог, чтобы не портить сборку."""
     workspace = pathlib.Path(tempfile.mkdtemp(prefix="so101-manual-"))
     config = json.loads((BUILD / "send_config.json").read_text())
     config["port"] = port
@@ -68,64 +93,53 @@ def run(binary: str, workspace: str, *arguments: str) -> subprocess.CompletedPro
     )
 
 
-def broken_urdf() -> pathlib.Path:
-    """URDF с намеренно испорченной верхней границей shoulder_pan."""
+def resized_urdf(span_steps: int) -> pathlib.Path:
+    """URDF, где shoulder_pan имеет диапазон span_steps отсчётов."""
     text = URDF.read_text()
-    # Первый аргумент — паттерн (экранированные точки), второй — подстановка,
-    # здесь экранировать ничего не нужно.
-    broken = re.sub(
-        r'lower="-1\.91986" upper="2\.0096241445"',
-        'lower="-1.91986" upper="1.91986"',
-        text,
+    match = re.search(r'lower="(-?[\d.]+)" upper="(-?[\d.]+)"', text)
+    if match is None:
+        raise SystemExit("не нашёлся блок <limit> shoulder_pan")
+    lower = float(match.group(1))
+    upper = lower + span_steps * 2.0 * math.pi / 4095.0
+    broken = text.replace(
+        f'lower="{match.group(1)}" upper="{match.group(2)}"',
+        f'lower="{lower}" upper="{upper}"',
+        1,
     )
-    if broken == text:
-        raise SystemExit(
-            "не нашлась строка <limit> shoulder_pan — генератор URDF изменился, "
-            "обновите тест"
-        )
-    target = pathlib.Path(tempfile.mkdtemp(prefix="so101-urdf-")) / "broken.urdf"
+    target = pathlib.Path(tempfile.mkdtemp(prefix="so101-urdf-")) / "resized.urdf"
     target.write_text(broken)
     return target
 
 
-def scenario_registers_match_reference() -> None:
-    print("\n1. Регистры совпадают с эталоном")
-    with FakeServoBus([s["min"] for s in REFERENCE],
-                      [s["max"] for s in REFERENCE]) as bus:
+def scenario_registers_match_urdf() -> None:
+    print("\n1. Регистры совпадают с URDF")
+    with FakeServoBus([lo for lo, _ in REFERENCE], [hi for _, hi in REFERENCE]) as bus:
         workspace = build_config(bus.start())
-        (pathlib.Path(workspace) / "servo_limits.json").write_text(
-            (BUILD / "servo_limits.json").read_text()
-        )
         result = run("base_angle", workspace)
         check(result.returncode == 0, "base_angle завершился успешно",
               result.stderr.strip()[:200])
         check("angle:" in result.stdout, "base_angle напечатал углы")
-        check("Warning" not in result.stderr,
-              "предупреждения о расхождении нет")
+        check("Warning" not in result.stderr, "предупреждения о расхождении нет")
 
 
-def scenario_without_reference_file() -> None:
-    print("\n2. Эталонного файла нет в каталоге запуска")
-    with FakeServoBus([s["min"] for s in REFERENCE],
-                      [s["max"] for s in REFERENCE]) as bus:
+def scenario_without_calibration_file() -> None:
+    print("\n2. Файла калибровки в проекте нет")
+    check(not (ROOT / "servo_limits.json").exists(),
+          "servo_limits.json действительно удалён из проекта")
+    with FakeServoBus([lo for lo, _ in REFERENCE], [hi for _, hi in REFERENCE]) as bus:
         workspace = build_config(bus.start())
-        # servo_limits.json намеренно не копируем.
         result = run("base_angle", workspace)
-        check(result.returncode == 0,
-              "base_angle работает без файла калибровки",
+        check(result.returncode == 0, "base_angle работает без файла калибровки",
               result.stderr.strip()[:200])
 
 
 def scenario_registers_disagree_with_urdf() -> None:
     print("\n3. Регистры расходятся с URDF")
-    mins = [s["min"] for s in REFERENCE]
-    maxs = [s["max"] for s in REFERENCE]
-    maxs[0] -= 300  # shoulder_pan: 225.14 -> 208.88 градуса
+    mins = [lo for lo, _ in REFERENCE]
+    maxs = [hi for _, hi in REFERENCE]
+    maxs[0] -= 300
     with FakeServoBus(mins, maxs) as bus:
-        workspace = build_config(bus.start(), urdf=broken_urdf())
-        (pathlib.Path(workspace) / "servo_limits.json").write_text(
-            (BUILD / "servo_limits.json").read_text()
-        )
+        workspace = build_config(bus.start())
         result = run("cartesian_control", workspace)
         output = result.stdout + result.stderr
         check("Warning" in output, "печатается предупреждение")
@@ -137,52 +151,104 @@ def scenario_registers_disagree_with_urdf() -> None:
               "границы из регистров напечатаны при старте")
 
 
-def scenario_show_limits_comparison() -> None:
-    print("\n4. send --show-limits показывает оба источника")
-    mins = [s["min"] for s in REFERENCE]
-    maxs = list(s["max"] for s in REFERENCE)
-    maxs[2] = maxs[2] - 300  # elbow_flex расходится с эталоном
+def scenario_show_limits_matches_urdf() -> None:
+    print("\n4. send --show-limits против URDF")
+    mins = [lo for lo, _ in REFERENCE]
+    maxs = [hi for _, hi in REFERENCE]
+    maxs[2] -= 300  # elbow_flex расходится с URDF
     with FakeServoBus(mins, maxs) as bus:
         workspace = build_config(bus.start())
-        (pathlib.Path(workspace) / "servo_limits.json").write_text(
-            (BUILD / "servo_limits.json").read_text()
-        )
         result = run("send", workspace, "--show-limits")
         output = result.stdout + result.stderr
         check(result.returncode == 0, "вывод завершился успешно",
               result.stderr.strip()[:200])
-        check(output.count("|  registers |") == 6,
-              "шесть строк с регистрами",
+        check(output.count("|  registers |") == 6, "шесть строк с регистрами",
               f"найдено {output.count('|  registers |')}")
-        check(output.count("|  reference |") == 6,
-              "шесть строк с эталоном",
-              f"найдено {output.count('|  reference |')}")
-        check("joint 3:" in output, "назван расходящийся сустав номером")
-        check("Warning" in output, "выведено предупреждение о расхождении")
+        check(output.count("|       urdf |") == 6, "шесть строк с URDF",
+              f"найдено {output.count('|       urdf |')}")
+        check("joint 3 (elbow_flex):" in output,
+              "назван расходящийся сустав номером и именем")
+        check("168.88" in output and "195.25" in output,
+              "приведены обе величины — из регистров и из URDF")
+        check(output.count("<- differs") == 1,
+              "расходящаяся строка помечена в таблице",
+              f"меток {output.count('<- differs')}")
+        check("servo_limits" not in output, "файл калибровки больше не упоминается")
         check("sync_urdf_limits.py" in output, "подсказано, что делать дальше")
 
 
-def scenario_save_limits() -> None:
-    print("\n5. send --save-limits обновляет эталон")
-    mins = [s["min"] for s in REFERENCE]
-    maxs = list(s["max"] for s in REFERENCE)
+def scenario_show_limits_without_urdf() -> None:
+    print("\n5. send --show-limits без доступного URDF")
+    with FakeServoBus([lo for lo, _ in REFERENCE], [hi for _, hi in REFERENCE]) as bus:
+        workspace = build_config(bus.start(), urdf=pathlib.Path("/no/such.urdf"))
+        result = run("send", workspace, "--show-limits")
+        output = result.stdout + result.stderr
+        check(result.returncode != 0, "ненулевой код возврата")
+        check("URDF comparison impossible" in output,
+              "честно сказано, что сравнение невозможно")
+        check(output.count("|  registers |") == 6,
+              "границы по регистрам всё равно показаны")
+
+
+def scenario_generator_reads_bus() -> None:
+    print("\n6. Генератор URDF читает границы с шины")
+    mins = [lo for lo, _ in REFERENCE]
+    maxs = [hi for _, hi in REFERENCE]
     maxs[5] -= 42  # gripper перенастроили
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="so101-gen-"))
+    output = workspace / "generated.urdf"
+
     with FakeServoBus(mins, maxs) as bus:
-        workspace = build_config(bus.start())
-        reference_path = pathlib.Path(workspace) / "servo_limits.json"
-        reference_path.write_text((BUILD / "servo_limits.json").read_text())
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sync_urdf_limits.py"),
+             "--port", bus.start(), "--speed", "600",
+             "--source", str(SOURCE_URDF), "--output", str(output)],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
 
-        result = run("send", workspace, "--save-limits")
-        check(result.returncode == 0, "команда завершилась успешно",
-              result.stderr.strip()[:200])
-        check(reference_path.exists(), "эталонный файл создан")
-        saved = json.loads(reference_path.read_text())["servos"]
-        check([s["max"] for s in saved] == maxs,
-              "эталон записан по значениям регистров")
+    check(result.returncode == 0, "генератор завершился успешно",
+          result.stderr.strip()[:300])
+    check(output.exists(), "URDF записан")
+    if not output.exists():
+        return
 
-        follow_up = run("send", workspace, "--show-limits")
-        check("OK: servo registers match" in follow_up.stdout,
-              "после сохранения расхождений не осталось")
+    check(output.read_text() != URDF.read_text(),
+          "URDF отличается от прежнего — диапазон gripper действительно изменился")
+
+    import xml.etree.ElementTree as ElementTree
+    root = ElementTree.parse(output).getroot()
+    by_name = {joint.get("name"): joint.find("limit")
+               for joint in root.iter("joint")
+               if joint.get("type") == "revolute"}
+    gripper = by_name["gripper"]
+    span = float(gripper.get("upper")) - float(gripper.get("lower"))
+    check(round(span * STEPS_PER_RADIAN) == maxs[5],
+          "диапазон gripper в URDF совпадает с регистрами",
+          f"{round(span * STEPS_PER_RADIAN)} против {maxs[5]}")
+
+    # Перегенерация обязана быть идемпотентной: второй запуск с теми же
+    # границами не должен ничего менять.
+    check(run_generator_again(output) == output.read_text(),
+          "повторная генерация с теми же границами идемпотентна")
+
+
+def run_generator_again(previous: pathlib.Path) -> str:
+    mins = [lo for lo, _ in REFERENCE]
+    maxs = [hi for _, hi in REFERENCE]
+    maxs[5] -= 42
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="so101-gen2-"))
+    output = workspace / "again.urdf"
+    with FakeServoBus(mins, maxs) as bus:
+        subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "sync_urdf_limits.py"),
+             "--port", bus.start(), "--speed", "600",
+             "--source", str(SOURCE_URDF), "--output", str(output)],
+            cwd=str(workspace), capture_output=True, text=True, timeout=120,
+        )
+    return output.read_text() if output.exists() else previous.read_text() + " (нет файла)"
 
 
 def main() -> int:
@@ -190,12 +256,15 @@ def main() -> int:
         raise SystemExit("сначала соберите проект: cmake --build build")
     if not URDF.exists():
         raise SystemExit(f"не найден URDF: {URDF}")
+    if not SOURCE_URDF.exists():
+        raise SystemExit(f"не найден исходный URDF: {SOURCE_URDF}")
 
-    scenario_registers_match_reference()
-    scenario_without_reference_file()
+    scenario_registers_match_urdf()
+    scenario_without_calibration_file()
     scenario_registers_disagree_with_urdf()
-    scenario_show_limits_comparison()
-    scenario_save_limits()
+    scenario_show_limits_matches_urdf()
+    scenario_show_limits_without_urdf()
+    scenario_generator_reads_bus()
 
     print()
     if failures:

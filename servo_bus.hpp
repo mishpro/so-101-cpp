@@ -9,6 +9,9 @@
 // погрешность порядка 1e-5 градуса.
 inline constexpr double kDegreesPerStep = 360.0 / 4095.0;
 inline constexpr double kStepsPerDegree = 4095.0 / 360.0;
+// Отсчёты на радиан: нужно там, где диапазон приходит из URDF в радианах и
+// его нужно пересчитать в то количество шагов, которое описал бы такой мотор.
+inline constexpr double kStepsPerRadian = 4095.0 / (2.0 * 3.14159265358979323846);
 
 // Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
 // при которых мотор считает себя нулём градусов и концом хода.
@@ -64,15 +67,10 @@ int configure_serial_port(const char* port);
 // Читает границы одного мотора прямо из его регистров.
 bool read_servo_limits(int fd, uint8_t servo_id, ServoLimits& limits);
 
-// Читает границы всех шести моторов прямо из регистров. Это источник истины
-// для границ протокола: servo_limits.json — лишь эталонный снимок, и программы
-// управления от него не зависят.
+// Читает границы всех шести моторов прямо из регистров. Это единственный
+// источник границ протокола: в URDF те же значения переносятся генератором
+// tools/sync_urdf_limits.py, который читает регистры напрямую.
 bool read_all_servo_limits(int fd, ServoLimits limits[6]);
-
-// servo_limits.json: эталонный снимок границ. Из него генерируется URDF и по
-// нему проверяется согласованность офлайн, а не управляется роботом.
-bool load_servo_limits(const std::string& path, ServoLimits limits[6]);
-bool save_servo_limits(const std::string& path, const ServoLimits limits[6]);
 
 bool read_joint_angle(int fd, uint8_t servo_id, const ServoLimits& limits,
 					  float& angle_degrees);

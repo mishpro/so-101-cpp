@@ -54,12 +54,14 @@ find_package(pinocchio REQUIRED)
 
 add_library(servo_bus servo_bus.cpp)
 target_include_directories(servo_bus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(servo_bus PUBLIC nlohmann_json::nlohmann_json)
 so101_configure_target(servo_bus)
 
+# nlohmann_json нужен control_config.cpp, который входит в arm_model, а не
+# самому servo_bus: транспорт не знает про JSON.
 add_library(arm_model arm_model.cpp control_config.cpp)
 target_include_directories(arm_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(arm_model PUBLIC servo_bus pinocchio::pinocchio)
+target_link_libraries(arm_model PUBLIC servo_bus pinocchio::pinocchio
+                                   nlohmann_json::nlohmann_json)
 so101_configure_target(arm_model)
 
 add_executable(base_angle base_angle.cpp)
@@ -67,7 +69,7 @@ target_link_libraries(base_angle PRIVATE servo_bus)
 so101_configure_target(base_angle)
 
 add_executable(send send.cpp)
-target_link_libraries(send PRIVATE servo_bus)
+target_link_libraries(send PRIVATE arm_model)
 so101_configure_target(send)
 
 add_executable(cartesian_control cartesian_control.cpp)
@@ -76,14 +78,13 @@ so101_configure_target(cartesian_control)
 
 # Копия конфига обновляется при каждой сборке, а не только при конфигурации:
 # иначе правка send_config.json не попадала бы в build/ до перезапуска cmake.
+# Калибровки моторов здесь нет: она живёт в регистрах сервоприводов, а её
+# перенос в URDF делает tools/sync_urdf_limits.py, читая те же регистры.
 add_custom_command(TARGET cartesian_control POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/send_config.json
             ${CMAKE_CURRENT_BINARY_DIR}/send_config.json
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/servo_limits.json
-            ${CMAKE_CURRENT_BINARY_DIR}/servo_limits.json
-    COMMENT "Refreshing config and calibration in the build directory")
+    COMMENT "Refreshing config in the build directory")
 
 include(CTest)
 if(BUILD_TESTING)

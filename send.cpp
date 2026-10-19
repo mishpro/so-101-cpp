@@ -1,11 +1,9 @@
+#include "arm_model.hpp"
+#include "control_config.hpp"
 #include "servo_bus.hpp"
 
-#include <nlohmann/json.hpp>
-
-#include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
 #include <iomanip>
 #include <exception>
 #include <iostream>
@@ -14,108 +12,87 @@
 #include <unistd.h>
 
 namespace {
-using json = nlohmann::json;
+constexpr double kPi = 3.14159265358979323846;
+constexpr const char* kConfigPath = "send_config.json";
 
-struct SendConfig {
-    std::string port;
-    uint16_t speed;
-    float joint_speed_divisor;
-};
-
-bool load_send_config(const std::string& path, SendConfig& config) {
-    std::ifstream file(path);
-    if (!file) return false;
-
-    try {
-        const json data = json::parse(file);
-        config.port = data.at("port").get<std::string>();
-
-        const unsigned int speed = data.at("speed").get<unsigned int>();
-        if (speed < 1 || speed > 1000) return false;
-        config.speed = static_cast<uint16_t>(speed);
-
-        config.joint_speed_divisor =
-            data.at("joint_speed_divisor").get<float>();
-        return !config.port.empty() &&
-               std::isfinite(config.joint_speed_divisor) &&
-               config.joint_speed_divisor > 0.0f;
-    } catch (const std::exception&) {
-        return false;
-    }
-}
-
-// Эталонный снимок границ: из него генерируется URDF и им же проверяется
-// согласованность офлайн. Само управление роботом от него не зависит.
-constexpr const char* kServoLimitsPath = "servo_limits.json";
-
-// Печатает границы из регистров рядом с эталонным файлом и завершает
-// вердиктом о расхождении. Раньше --show-limits показывал только файл, чем
-// скрывал возможный разрыв между настройками моторов и описанием робота.
-void print_limits(const ServoLimits registers[6]) {
-    ServoLimits reference[6]{};
-    const bool has_reference = load_servo_limits(kServoLimitsPath, reference);
-
-    std::cout << "Joint | Source     | min step | max step | max deg\n";
-    std::cout << "------+------------+----------+----------+---------\n";
-    std::cout << std::fixed << std::setprecision(2);
-
-    int mismatches = 0;
-    for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-        const ServoLimits& from_registers = registers[joint_id - 1];
-        std::cout << std::setw(5) << static_cast<int>(joint_id) << " | "
+// Печатает границы регистров рядом с границами URDF и завершается вердиктом.
+// Сравнение идёт против URDF: он и есть источник истины для углов, а файл
+// калибровки в проекте нет вовсе — границы лежат в самих моторах.
+void print_register_rows(const ServoLimits registers[6]) {
+    for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
+        const ServoLimits& from_registers = registers[servo_id - 1];
+        std::cout << std::setw(5) << static_cast<int>(servo_id) << " | "
                   << std::setw(10) << "registers" << " | "
                   << std::setw(8) << from_registers.min_position << " | "
                   << std::setw(8) << from_registers.max_position << " | "
-                  << std::setw(7) << from_registers.span_degrees() << '\n';
+                  << std::setw(8) << from_registers.span_degrees() << '\n';
+    }
+}
 
-        if (!has_reference) continue;
+bool print_limits(const ServoLimits registers[6], const ControlConfig& config) {
+    std::cout << "Joint | Source    | min step | max step | span deg\n";
+    std::cout << "------+------------+----------+----------+---------\n";
+    std::cout << std::fixed << std::setprecision(2);
 
-        const ServoLimits& from_file = reference[joint_id - 1];
+    so101::ArmModel arm{};
+    std::string error;
+    if (!so101::load_arm_model(config.urdf_path, config.end_effector, arm, error)) {
+        print_register_rows(registers);
+        std::cout << '\n';
+        std::cerr << "URDF comparison impossible: " << error << '\n';
+        std::cerr << "Границы URDF берутся из send_config.json -> urdf_path"
+                  << std::endl;
+        return false;
+    }
+
+    // Из URDF нельзя выписать отсчёты напрямую — там радианы. Обратный
+    // пересчёт даёт то количество шагов, которое описал бы мотор с таким
+    // диапазоном, и делает строки таблицы сопоставимыми.
+    for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
+        const ServoLimits& from_registers = registers[servo_id - 1];
+        std::cout << std::setw(5) << static_cast<int>(servo_id) << " | "
+                  << std::setw(10) << "registers" << " | "
+                  << std::setw(8) << from_registers.min_position << " | "
+                  << std::setw(8) << from_registers.max_position << " | "
+                  << std::setw(8) << from_registers.span_degrees() << '\n';
+
+        const double span =
+            arm.upper_position_limit(servo_id) -
+            arm.lower_position_limit(servo_id);
+        const ServoLimits implied{0,
+                                   static_cast<uint16_t>(std::lround(
+                                       span * kStepsPerRadian))};
         const bool differs =
-            from_file.min_position != from_registers.min_position ||
-            from_file.max_position != from_registers.max_position;
-        std::cout << "       | " << std::setw(10) << "reference" << " | " << std::setw(8) << from_file.min_position << " | "
-                  << std::setw(8) << from_file.max_position << " | "
-                  << std::setw(7) << from_file.span_degrees()
+            implied.min_position != from_registers.min_position ||
+            implied.max_position != from_registers.max_position;
+        std::cout << "       | " << std::setw(10) << "urdf" << " | "
+                  << std::setw(8) << implied.min_position << " | "
+                  << std::setw(8) << implied.max_position << " | "
+                  << std::setw(8) << implied.span_degrees()
                   << (differs ? "  <- differs" : "") << '\n';
-        if (differs) ++mismatches;
     }
 
-    if (!has_reference) {
-        std::cout << "\nNo reference file " << kServoLimitsPath
-                  << "; create it on the stand with ./build/send --save-limits"
+    std::string mismatches;
+    const bool agree = so101::check_joint_limits(arm, registers, 0.5 * kPi / 180.0,
+                                          mismatches);
+    if (agree) {
+        std::cout << "\nOK: servo registers match " << config.urdf_path
                   << std::endl;
-        return;
-    }
-    if (mismatches == 0) {
-        std::cout << "\nOK: servo registers match " << kServoLimitsPath
-                  << std::endl;
-        return;
+        return true;
     }
 
-    std::cout << "\nWarning: " << mismatches
-              << " joint(s) differ between the servo registers and "
-              << kServoLimitsPath << ":\n";
-    for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-        const float delta = registers[joint_id - 1].span_degrees() -
-                            reference[joint_id - 1].span_degrees();
-        if (std::fabs(delta) < 0.005f) continue;
-        std::cout << "  joint " << static_cast<int>(joint_id) << ": registers "
-                  << registers[joint_id - 1].span_degrees()
-                  << " deg, reference "
-                  << reference[joint_id - 1].span_degrees() << " deg, delta "
-                  << (delta > 0 ? "+" : "") << delta << "\n";
-    }
-    std::cout << "The robot is driven by the registers. If they were re-tuned, "
-                 "run\n  ./build/send --save-limits"
-                 "\n  python3 tools/sync_urdf_limits.py" << std::endl;
+    std::cout << '\n' << mismatches << '\n';
+    std::cout << "Углы берутся из URDF, поэтому робот работает, но описание "
+                 "устарело.\nОбновить:\n"
+                 "  python3 tools/sync_urdf_limits.py" << std::endl;
+    return true;
 }
 }
 
 int main(int argc, char** argv) {
-    SendConfig config{};
-    if (!load_send_config("send_config.json", config)) {
-        std::cerr << "Failed to load valid send_config.json" << std::endl;
+    ControlConfig config{};
+    if (!load_config(kConfigPath, config)) {
+        std::cerr << "Failed to load valid " << kConfigPath << std::endl;
         return 1;
     }
 
@@ -125,7 +102,6 @@ int main(int argc, char** argv) {
     bool set_base = false;
     bool disable_torque = false;
     bool show_limits = false;
-    bool save_limits = false;
     std::vector<std::pair<uint8_t, float>> commands;
 
     for (int argument_index = 1; argument_index < argc; ++argument_index) {
@@ -157,8 +133,7 @@ int main(int argc, char** argv) {
         }
 
         if (argument == "--set-middle") {
-            if (set_middle || set_base || show_limits || save_limits ||
-                !commands.empty()) {
+            if (set_middle || set_base || show_limits || !commands.empty()) {
                 std::cerr << "--set-middle cannot be combined with another preset"
                           << std::endl;
                 return 1;
@@ -168,8 +143,7 @@ int main(int argc, char** argv) {
         }
 
         if (argument == "--set-base") {
-            if (set_middle || set_base || show_limits || save_limits ||
-                !commands.empty()) {
+            if (set_middle || set_base || show_limits || !commands.empty()) {
                 std::cerr << "--set-base cannot be combined with another preset"
                           << std::endl;
                 return 1;
@@ -180,7 +154,7 @@ int main(int argc, char** argv) {
 
         if (argument == "--disable-torque") {
             if (disable_torque || show_limits || set_middle || set_base ||
-                save_limits || !commands.empty()) {
+                !commands.empty()) {
                 std::cerr << "--disable-torque cannot be combined with another command"
                           << std::endl;
                 return 1;
@@ -191,7 +165,7 @@ int main(int argc, char** argv) {
 
         if (argument == "--show-limits") {
             if (show_limits || disable_torque || set_middle || set_base ||
-                save_limits || !commands.empty()) {
+                !commands.empty()) {
                 std::cerr << "--show-limits cannot be combined with another command"
                           << std::endl;
                 return 1;
@@ -200,29 +174,17 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        if (argument == "--save-limits") {
-            if (save_limits || show_limits || disable_torque || set_middle ||
-                set_base || !commands.empty()) {
-                std::cerr << "--save-limits cannot be combined with another command"
-                          << std::endl;
-                return 1;
-            }
-            save_limits = true;
-            continue;
-        }
-
         if (show_limits || disable_torque || set_middle || set_base ||
-            save_limits || argument.size() < 3 ||
+            argument.size() < 3 ||
             argument[0] != '-' ||
             argument[1] != 'j') {
-            if (show_limits || disable_torque || set_middle || set_base ||
-                save_limits) {
+            if (show_limits || disable_torque || set_middle || set_base) {
                 std::cerr << "Command cannot be combined with joint commands"
                           << std::endl;
                 return 1;
             }
             std::cerr << "Usage: " << argv[0]
-                      << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | --save-limits | -j1..-j6 ANGLE]..."
+                      << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | -j1..-j6 ANGLE]..."
                       << std::endl;
             return 1;
         }
@@ -247,10 +209,10 @@ int main(int argc, char** argv) {
     }
 
     if (commands.empty() && !set_middle && !set_base && !disable_torque &&
-        !show_limits && !save_limits) {
+        !show_limits) {
         std::cout << "No joints specified. Nothing was sent." << std::endl;
         std::cout << "Usage: " << argv[0]
-                  << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | --save-limits | -j1..-j6 ANGLE]..."
+                  << " [-p PORT] [-s SPEED] [--set-middle | --set-base | --disable-torque | --show-limits | -j1..-j6 ANGLE]..."
                   << std::endl;
         return 0;
     }
@@ -269,23 +231,8 @@ int main(int argc, char** argv) {
 
         std::cout << "Successfully connected to SO-101 Bus!" << std::endl;
 
-        if (save_limits) {
-            if (!save_servo_limits(kServoLimitsPath, limits)) {
-                std::cerr << "Failed to write " << kServoLimitsPath
-                          << std::endl;
-                return 1;
-            }
-            std::cout << "Servo registers saved to " << kServoLimitsPath
-                      << std::endl;
-            std::cout << "Regenerate the URDF to match them: "
-                         "python3 tools/sync_urdf_limits.py"
-                      << std::endl;
-            return 0;
-        }
-
         if (show_limits) {
-            print_limits(limits);
-            return 0;
+            return print_limits(limits, config) ? 0 : 1;
         }
 
         if (disable_torque) {

@@ -39,17 +39,24 @@ std::string test_end_effector() {
     return config.end_effector;
 }
 
-// Калибровка этого экземпляра робота — тот же файл, что читает программа.
-std::array<ServoLimits, kServoCount> reference_limits() {
-    ServoLimits raw[kServoCount]{};
-    if (!load_servo_limits("servo_limits.json", raw)) {
-        std::cerr << "Не удалось прочитать servo_limits.json из рабочего "
-                     "каталога\n";
-        std::exit(EXIT_FAILURE);
-    }
+// Калибровка этого экземпляра робота лежит в регистрах моторов, а её перенос в
+// URDF делает tools/sync_urdf_limits.py. Отдельного файла с эталоном в проекте
+// нет, и хранить его копию в коде тоже незачем: все проверки ниже работают с
+// ДИАПАЗОНОМ мотора, а он восстанавливается из span блоков <limit> однозначно.
+// Абсолютный min_position не используется нигде — формула привязки сохраняет
+// исходный lower, поэтому диапазон и есть единственное, что связывает URDF с
+// моторами.
+std::array<ServoLimits, kServoCount> reference_limits(const so101::ArmModel& arm) {
     std::array<ServoLimits, kServoCount> limits{};
     for (std::size_t index = 0; index < kServoCount; ++index) {
-        limits[index] = raw[index];
+        const int servo_id = static_cast<int>(index) + 1;
+        const double span = arm.upper_position_limit(servo_id) -
+                            arm.lower_position_limit(servo_id);
+        const long steps = std::lround(span * kStepsPerRadian);
+        // Диапазон URDF обязан укладываться в 16-битные отсчёты мотора: иначе
+        // перевод градусов в позицию терял бы точность или переполнялся.
+        CHECK(steps > 0 && steps <= 65535);
+        limits[index] = {0, static_cast<uint16_t>(steps)};
     }
     return limits;
 }
@@ -64,7 +71,7 @@ void test_ik_joint_set(const so101::ArmModel& arm) {
 }
 
 void test_limits_match_calibration(const so101::ArmModel& arm) {
-    const auto limits = reference_limits();
+    const auto limits = reference_limits(arm);
     std::string error;
     CHECK_MSG(so101::check_joint_limits(arm, limits.data(), 0.5 * kPi / 180.0,
                                         error),
@@ -78,15 +85,11 @@ void test_limits_match_calibration(const so101::ArmModel& arm) {
     }
 }
 
-void test_limits_check_detects_drift() {
-    so101::ArmModel arm{};
+void test_limits_check_detects_drift(const so101::ArmModel& model) {
     std::string error;
-    CHECK(so101::load_arm_model(test_urdf_path(), test_end_effector(), arm,
-                                error));
-
-    auto limits = reference_limits();
+    auto limits = reference_limits(model);
     limits[4].max_position = static_cast<uint16_t>(limits[4].max_position - 300);
-    CHECK(!so101::check_joint_limits(arm, limits.data(), 0.5 * kPi / 180.0,
+    CHECK(!so101::check_joint_limits(model, limits.data(), 0.5 * kPi / 180.0,
                                      error));
     // В сообщении должно быть имя именно сломанного сустава.
     CHECK(error.find("wrist_roll") != std::string::npos);
@@ -94,33 +97,33 @@ void test_limits_check_detects_drift() {
     CHECK(error.find("URDF says") != std::string::npos);
 
     // Расхождения накапливаются: видны все, а не только первое.
-    auto two_drifted = reference_limits();
+    auto two_drifted = reference_limits(model);
     two_drifted[4].max_position =
         static_cast<uint16_t>(two_drifted[4].max_position - 300);
     two_drifted[2].min_position =
         static_cast<uint16_t>(two_drifted[2].min_position + 200);
-    CHECK(!so101::check_joint_limits(arm, two_drifted.data(),
+    CHECK(!so101::check_joint_limits(model, two_drifted.data(),
                                      0.5 * kPi / 180.0, error));
     CHECK(error.find("wrist_roll") != std::string::npos);
     CHECK(error.find("elbow_flex") != std::string::npos);
 
     // Сообщение об ошибке пустее, когда всё сошлось.
-    CHECK(so101::check_joint_limits(arm, reference_limits().data(),
+    CHECK(so101::check_joint_limits(model, reference_limits(model).data(),
                                     0.5 * kPi / 180.0, error));
     CHECK(error.empty());
 
     // Пустой диапазон мотора тоже должен ловиться.
-    auto empty = reference_limits();
+    auto empty = reference_limits(model);
     empty[0].max_position = empty[0].min_position;
-    CHECK(!so101::check_joint_limits(arm, empty.data(), 0.5 * kPi / 180.0,
+    CHECK(!so101::check_joint_limits(model, empty.data(), 0.5 * kPi / 180.0,
                                      error));
     CHECK(error.find("empty") != std::string::npos);
 }
 
 // Границы протокола считаются по формуле мотора, а не повторной реализацией:
 // span_degrees() и span в градусах обязаны совпадать.
-void test_servo_span_matches_degrees() {
-    const auto limits = reference_limits();
+void test_servo_span_matches_degrees(const so101::ArmModel& arm) {
+    const auto limits = reference_limits(arm);
     for (std::size_t index = 0; index < kServoCount; ++index) {
         const double steps = static_cast<double>(limits[index].max_position -
                                                  limits[index].min_position);
@@ -136,7 +139,7 @@ void test_servo_span_matches_degrees() {
 }
 
 void test_angle_roundtrip(const so101::ArmModel& arm) {
-    const auto limits = reference_limits();
+    const auto limits = reference_limits(arm);
     for (std::size_t index = 0; index < so101::kServoCount; ++index) {
         const int servo_id = static_cast<int>(index) + 1;
         const double span_deg = arm.servo_span_rad(limits[index]) * 180.0 / kPi;
@@ -156,7 +159,7 @@ void test_angle_roundtrip(const so101::ArmModel& arm) {
 }
 
 void test_q_to_degrees_clamps(const so101::ArmModel& arm) {
-    const auto limits = reference_limits();
+    const auto limits = reference_limits(arm);
     const int servo_id = 1;
     const double span_deg = arm.servo_span_rad(limits[0]) * 180.0 / kPi;
 
@@ -386,8 +389,8 @@ int main() {
 
     test_ik_joint_set(arm);
     test_limits_match_calibration(arm);
-    test_limits_check_detects_drift();
-    test_servo_span_matches_degrees();
+    test_limits_check_detects_drift(arm);
+    test_servo_span_matches_degrees(arm);
     test_angle_roundtrip(arm);
     test_q_to_degrees_clamps(arm);
     test_ik_ignores_wrist_roll(arm);
