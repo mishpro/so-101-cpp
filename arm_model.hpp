@@ -26,6 +26,15 @@ inline constexpr std::size_t kServoCount = 6;
 //     от нажатия к нажатию. Управляется отдельно, как -j5 в send.
 inline constexpr std::size_t kIkJointCount = 4;
 
+// Допуск расхождения диапазона мотора и диапазона URDF: 0.5°.
+//
+// Константа одна на весь проект намеренно. Пока порог жил отдельно в
+// cartesian_control.cpp и дублировался в send.cpp, таблица --show-limits
+// могла пометить расхождение там, где вердикт считал его допустимым: маркер
+// сравнивал абсолютные отсчёты, вердикт — span. Теперь и подпись в таблице,
+// и итоговая строка считают одно и то же.
+inline constexpr double kJointLimitToleranceRad = 0.008726646259971648; // 0.5°
+
 struct ArmModel {
 	pinocchio::Model model;
 	pinocchio::Data data;

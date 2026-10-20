@@ -21,9 +21,6 @@ namespace {
 using so101::kIkJointCount;
 using so101::kServoCount;
 
-// Допуск расхождения границ URDF и калибровки моторов: 0.5°.
-constexpr double kJointLimitToleranceRad = 0.008726646259971648;
-
 class TerminalInput {
 public:
     TerminalInput() {
@@ -257,7 +254,7 @@ int main() {
         // что моторы перенастроены относительно модели: работаем дальше, но
         // говорим об этом.
         if (!so101::check_joint_limits(arm, limits.data(),
-                                       kJointLimitToleranceRad, error)) {
+                                       so101::kJointLimitToleranceRad, error)) {
             std::cerr << "\nWarning: servo registers disagree with the URDF: "
                       << error
                       << "\n         angles are taken from the URDF; if the arm "

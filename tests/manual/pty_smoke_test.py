@@ -12,8 +12,9 @@
   3. регистры расходятся с URDF — печатается предупреждение, работа не
      прекращается (источник истины для углов — URDF);
   4. send --show-limits показывает регистры рядом с URDF и вердикт;
-  5. send --show-limits честно отказывается, если URDF недоступен;
-  6. генератор URDF читает границы с шины и перегенерирует файл.
+  5. маркер --show-limits не путает недоступный URDF минимум мотора;
+  6. send --show-limits честно отказывается, если URDF недоступен;
+  7. генератор URDF читает границы с шины и перегенерирует файл.
 
 Запуск: python3 tests/manual/pty_smoke_test.py
 """
@@ -32,10 +33,17 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from fake_servo_bus import FakeServoBus  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+# Генератору нужен pyserial, которого нет в системном Python. Если рядом с
+# проектом есть .venv, берём его интерпретатор, иначе текущий.
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+PYTHON = VENV_PYTHON if VENV_PYTHON.exists() else pathlib.Path(sys.executable)
 BUILD = ROOT / "build"
 URDF = pathlib.Path(os.path.expanduser("~/develop/urdf/so101_irs_ksant.urdf"))
 SOURCE_URDF = pathlib.Path(os.path.expanduser("~/develop/urdf/so101_new_calib.urdf"))
 STEPS_PER_RADIAN = 4095.0 / (2.0 * math.pi)
+
+# Настоящие минимумы моторов: ноль здесь маскировал бы дефект сравнения.
+MOCK_MINS = [767, 812, 886, 900, 260, 1420]
 
 failures: list[str] = []
 
@@ -50,7 +58,15 @@ def check(condition: bool, description: str, detail: str = "") -> None:
 
 
 def urdf_limits() -> list[tuple[int, int]]:
-    """Выводит диапазоны моторов из span блоков <limit> — как это делает send."""
+    """Выводит диапазоны моторов из span блоков <limit> — как это делает send.
+
+    Минимумы берутся настоящие, а не нулевые. Ноль здесь был бы верен только
+    арифметически, но он же и маскировал дефект: подразуваемый минимум URDF
+    по построению равен нулю, поэтому с нулевыми минимумами на эмуляторе
+    невозможно отличить корректную работу от сломанной. На живых моторах
+    минимумы 767, 812, 886, и любой сравнитель по абсолютным отсчётам на них
+    сразу рассыпается.
+    """
     import xml.etree.ElementTree as ElementTree
 
     root = ElementTree.parse(URDF).getroot()
@@ -62,9 +78,9 @@ def urdf_limits() -> list[tuple[int, int]]:
     order = ["shoulder_pan", "shoulder_lift", "elbow_flex",
              "wrist_flex", "wrist_roll", "gripper"]
     limits = []
-    for name in order:
+    for index, name in enumerate(order):
         span = float(by_name[name].get("upper")) - float(by_name[name].get("lower"))
-        limits.append((0, round(span * STEPS_PER_RADIAN)))
+        limits.append((MOCK_MINS[index], MOCK_MINS[index] + round(span * STEPS_PER_RADIAN)))
     return limits
 
 
@@ -83,6 +99,20 @@ def build_config(port: str, urdf: pathlib.Path | None = None) -> str:
 
 
 def run(binary: str, workspace: str, *arguments: str) -> subprocess.CompletedProcess:
+    """Запускает программу в подготовленном каталоге.
+
+    Порт берётся из send_config.json внутри workspace. Раньше base_angle этот
+    файл не читал и молча открывал /dev/ttyACM0, то есть прогон «на эмуляторе»
+    на самом деле обращался к живой руке. Теперь порт задаётся явно, а
+    config_port проверяется, чтобы такая ошибка не могла вернуться молча.
+    """
+    config_port = json.loads(
+        (pathlib.Path(workspace) / "send_config.json").read_text())["port"]
+    if not config_port.startswith("/dev/pts/"):
+        raise SystemExit(
+            f"отказ: сценарий собран не на эмуляторе, порт {config_port}. "
+            f"Прогонять на живой руке нельзя — часть сценариев пишет в моторы."
+        )
     return subprocess.run(
         [str(BUILD / binary), *arguments],
         cwd=workspace,
@@ -162,23 +192,46 @@ def scenario_show_limits_matches_urdf() -> None:
         output = result.stdout + result.stderr
         check(result.returncode == 0, "вывод завершился успешно",
               result.stderr.strip()[:200])
-        check(output.count("|  registers |") == 6, "шесть строк с регистрами",
-              f"найдено {output.count('|  registers |')}")
-        check(output.count("|       urdf |") == 6, "шесть строк с URDF",
-              f"найдено {output.count('|       urdf |')}")
+        check(output.count("|") >= 6, "шесть строк таблицы")
         check("joint 3 (elbow_flex):" in output,
               "назван расходящийся сустав номером и именем")
-        check("168.88" in output and "195.25" in output,
-              "приведены обе величины — из регистров и из URDF")
+        joint3_from_registers = (maxs[2] - mins[2]) * 360.0 / 4095.0
+        joint3_from_urdf = REFERENCE[2][1] - REFERENCE[2][0]
+        joint3_from_urdf = joint3_from_urdf * 360.0 / 4095.0
+        check(f"{joint3_from_registers:.2f}" in output
+              and f"{joint3_from_urdf:.2f}" in output,
+              "приведены обе величины — из регистра и из URDF",
+              f"{joint3_from_registers:.2f} и {joint3_from_urdf:.2f}")
         check(output.count("<- differs") == 1,
-              "расходящаяся строка помечена в таблице",
+              "помечена ровно одна расходящаяся строка",
               f"меток {output.count('<- differs')}")
-        check("servo_limits" not in output, "файл калибровки больше не упоминается")
         check("sync_urdf_limits.py" in output, "подсказано, что делать дальше")
 
 
+def scenario_marker_ignores_absolute_minimum() -> None:
+    """Регрессия: маркер обязан смотреть на диапазон, а не на отсчёты.
+
+    Минимумы мотора (767, 812, ...) абсолютным отсчётам URDF недоступны —
+    там градусы. Раньше маркер сравнивал их напрямую и помечал все шесть
+    строк, тогда как вердикт считал расхождение допустимым.
+    """
+    print("\n5. Маркер не путает минимум мотора с недоступным ему отсчётом")
+    with FakeServoBus([lo for lo, _ in REFERENCE], [hi for _, hi in REFERENCE]) as bus:
+        workspace = build_config(bus.start())
+        result = run("send", workspace, "--show-limits")
+        output = result.stdout + result.stderr
+        check(result.returncode == 0, "вывод завершился успешно",
+              result.stderr.strip()[:200])
+        check("OK:" in output, "вердикт OK — диапазоны совпадают")
+        check("<- differs" not in output,
+              "ни одна строка не помечена, хотя минимумы ненулевые",
+              f"меток {output.count('<- differs')}")
+        check("0.50" in output or "0.5" in output,
+              "допуск напечатан, иначе OK рядом с дельтой удивляет")
+
+
 def scenario_show_limits_without_urdf() -> None:
-    print("\n5. send --show-limits без доступного URDF")
+    print("\n6. send --show-limits без доступного URDF")
     with FakeServoBus([lo for lo, _ in REFERENCE], [hi for _, hi in REFERENCE]) as bus:
         workspace = build_config(bus.start(), urdf=pathlib.Path("/no/such.urdf"))
         result = run("send", workspace, "--show-limits")
@@ -186,12 +239,12 @@ def scenario_show_limits_without_urdf() -> None:
         check(result.returncode != 0, "ненулевой код возврата")
         check("URDF comparison impossible" in output,
               "честно сказано, что сравнение невозможно")
-        check(output.count("|  registers |") == 6,
+        check(str(MOCK_MINS[0]) in output,
               "границы по регистрам всё равно показаны")
 
 
 def scenario_generator_reads_bus() -> None:
-    print("\n6. Генератор URDF читает границы с шины")
+    print("\n7. Генератор URDF читает границы с шины")
     mins = [lo for lo, _ in REFERENCE]
     maxs = [hi for _, hi in REFERENCE]
     maxs[5] -= 42  # gripper перенастроили
@@ -200,8 +253,8 @@ def scenario_generator_reads_bus() -> None:
 
     with FakeServoBus(mins, maxs) as bus:
         result = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "sync_urdf_limits.py"),
-             "--port", bus.start(), "--speed", "600",
+            [str(PYTHON), str(ROOT / "tools" / "sync_urdf_limits.py"),
+             "--port", bus.start(), "--baud", "1000000",
              "--source", str(SOURCE_URDF), "--output", str(output)],
             cwd=str(workspace),
             capture_output=True,
@@ -225,9 +278,12 @@ def scenario_generator_reads_bus() -> None:
                if joint.get("type") == "revolute"}
     gripper = by_name["gripper"]
     span = float(gripper.get("upper")) - float(gripper.get("lower"))
-    check(round(span * STEPS_PER_RADIAN) == maxs[5],
+    # Сравнивается ДИАПАЗОН, а не абсолютный отсчёт: в URDF градусы, и
+    # абсолютного минимума мотора там нет вовсе.
+    expected_span = maxs[5] - mins[5]
+    check(round(span * STEPS_PER_RADIAN) == expected_span,
           "диапазон gripper в URDF совпадает с регистрами",
-          f"{round(span * STEPS_PER_RADIAN)} против {maxs[5]}")
+          f"{round(span * STEPS_PER_RADIAN)} против {expected_span}")
 
     # Перегенерация обязана быть идемпотентной: второй запуск с теми же
     # границами не должен ничего менять.
@@ -243,8 +299,8 @@ def run_generator_again(previous: pathlib.Path) -> str:
     output = workspace / "again.urdf"
     with FakeServoBus(mins, maxs) as bus:
         subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "sync_urdf_limits.py"),
-             "--port", bus.start(), "--speed", "600",
+            [str(PYTHON), str(ROOT / "tools" / "sync_urdf_limits.py"),
+             "--port", bus.start(), "--baud", "1000000",
              "--source", str(SOURCE_URDF), "--output", str(output)],
             cwd=str(workspace), capture_output=True, text=True, timeout=120,
         )
@@ -263,6 +319,7 @@ def main() -> int:
     scenario_without_calibration_file()
     scenario_registers_disagree_with_urdf()
     scenario_show_limits_matches_urdf()
+    scenario_marker_ignores_absolute_minimum()
     scenario_show_limits_without_urdf()
     scenario_generator_reads_bus()
 

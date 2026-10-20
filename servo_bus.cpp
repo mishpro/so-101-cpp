@@ -18,7 +18,6 @@ constexpr uint8_t REG_GOAL_POSITION = 0x2A;
 constexpr uint8_t REG_GOAL_VELOCITY = 0x2E;
 constexpr uint8_t REG_PRESENT_POSITION = 0x38;
 constexpr uint8_t REG_TORQUE_ENABLE = 0x28;
-constexpr speed_t SERVO_BAUD = B1000000;
 
 uint8_t checksum(const uint8_t* packet, int first, int last) {
     uint32_t sum = 0;
@@ -133,8 +132,8 @@ int configure_serial_port(const char* port) {
         return -1;
     }
 
-    cfsetospeed(&tty, SERVO_BAUD);
-    cfsetispeed(&tty, SERVO_BAUD);
+    cfsetospeed(&tty, kServoBusBaud);
+    cfsetispeed(&tty, kServoBusBaud);
     tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;
     tty.c_cflag |= CLOCAL | CREAD;
     tty.c_cflag &= ~(PARENB | PARODD | CSTOPB | CRTSCTS);

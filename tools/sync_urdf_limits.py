@@ -47,6 +47,11 @@ COUNTS_PER_REVOLUTION = 4095.0
 REG_MIN_POSITION_LIMIT = 0x09
 REG_MAX_POSITION_LIMIT = 0x0B
 
+# Бодовая скорость шины сервоприводов: 1 Мбит/с, как в servo_bus.cpp.
+# Это НЕ поле speed из send_config.json — там скорость МОТОРА (регистр
+# GOAL_VELOCITY). На 600 бод, взятых из конфига, сервоприводы молчат.
+BUS_BAUD = 1000000
+
 JOINT_OPEN_RE = re.compile(r'<joint\s+name="([^"]+)"[^>]*\btype="revolute"')
 JOINT_CLOSE = "</joint>"
 LIMIT_RE = re.compile(
@@ -88,7 +93,9 @@ def read_register(link, servo_id: int, address: int, timeout: float) -> int:
     if len(response) != 8:
         raise OSError(
             f"мотор {servo_id}: ответ на чтение регистра 0x{address:02X} "
-            f"обрезан ({len(response)} из 8 байт)"
+            f"обрезан ({len(response)} из 8 байт). Молчание сервоприводов почти "
+            f"всегда означает неверную бодовую скорость: нужна {BUS_BAUD} бод, "
+            f"а поле speed из send_config.json относится к скорости мотора."
         )
     if response[0] != 0xFF or response[1] != 0xFF or response[2] != servo_id:
         raise OSError(
@@ -109,7 +116,7 @@ def read_register(link, servo_id: int, address: int, timeout: float) -> int:
 
 
 def read_servo_limits_from_bus(
-    port: str, speed: int, timeout: float
+    port: str, baud: int, timeout: float
 ) -> dict[int, tuple[int, int]]:
     """Считывает границы всех шести моторов как {servo_id: (min, max)}.
 
@@ -122,9 +129,9 @@ def read_servo_limits_from_bus(
         )
 
     try:
-        link = serial.Serial(port, speed, timeout=timeout)
+        link = serial.Serial(port, baud, timeout=timeout)
     except Exception as error:  # pyserial бросает разные исключения
-        raise OSError(f"не удалось открыть {port} на скорости {speed}: {error}") from error
+        raise OSError(f"не удалось открыть {port} на скорости {baud}: {error}") from error
 
     limits: dict[int, tuple[int, int]] = {}
     try:
@@ -279,11 +286,15 @@ def main() -> int:
     parser.add_argument(
         "--config",
         default="send_config.json",
-        help="откуда взять порт и скорость по умолчанию",
+        help="откуда взять порт по умолчанию",
     )
     parser.add_argument("--port", help="порт сервоприводов (перекрывает конфиг)")
     parser.add_argument(
-        "--speed", type=int, help="скорость шины в бодах (перекрывает конфиг)"
+        "--baud",
+        type=int,
+        default=BUS_BAUD,
+        help="бодовая скорость шины (по умолчанию %(default)s; поле speed из "
+             "конфига — это скорость мотора, а не шины)",
     )
     parser.add_argument(
         "--timeout",
@@ -300,22 +311,22 @@ def main() -> int:
         print(f"Не найден исходный URDF: {source}", file=sys.stderr)
         return 1
 
-    port, speed = args.port, args.speed
-    if port is None or speed is None:
+    # Из конфига берётся только порт: скорость шины фиксирована и от настроек
+    # мотора не зависит.
+    port = args.port
+    if port is None:
         try:
             config = json.loads(expand_home(Path(args.config)).read_text("utf-8"))
         except (OSError, ValueError) as error:
             print(f"Не удалось прочитать {args.config}: {error}", file=sys.stderr)
             return 1
-        port = port if port is not None else config.get("port")
-        speed = speed if speed is not None else config.get("speed")
-    if not port or not speed:
-        print("Не заданы порт и скорость: укажите --port/--speed или конфиг",
-              file=sys.stderr)
+        port = config.get("port")
+    if not port:
+        print("Не задан порт: укажите --port или исправьте конфиг", file=sys.stderr)
         return 1
 
     try:
-        limits = read_servo_limits_from_bus(port, int(speed), args.timeout)
+        limits = read_servo_limits_from_bus(port, args.baud, args.timeout)
         text, changes = sync(source, limits)
     except (OSError, RuntimeError, ValueError, KeyError,
             ElementTree.ParseError) as error:

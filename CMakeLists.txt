@@ -56,16 +56,24 @@ add_library(servo_bus servo_bus.cpp)
 target_include_directories(servo_bus PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 so101_configure_target(servo_bus)
 
-# nlohmann_json нужен control_config.cpp, который входит в arm_model, а не
-# самому servo_bus: транспорт не знает про JSON.
-add_library(arm_model arm_model.cpp control_config.cpp)
+# nlohmann_json нужен control_config.cpp, а не самому servo_bus: транспорт
+# не знает про JSON.
+#
+# control_config вынесен в отдельную библиотеку, потому что читать send_config.json
+# должен в том числе base_angle, а тянуть ради этого pinocchio незачем.
+add_library(control_config control_config.cpp)
+target_include_directories(control_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(control_config PUBLIC nlohmann_json::nlohmann_json)
+so101_configure_target(control_config)
+
+add_library(arm_model arm_model.cpp)
 target_include_directories(arm_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(arm_model PUBLIC servo_bus pinocchio::pinocchio
-                                   nlohmann_json::nlohmann_json)
+                                   control_config)
 so101_configure_target(arm_model)
 
 add_executable(base_angle base_angle.cpp)
-target_link_libraries(base_angle PRIVATE servo_bus)
+target_link_libraries(base_angle PRIVATE control_config servo_bus)
 so101_configure_target(base_angle)
 
 add_executable(send send.cpp)

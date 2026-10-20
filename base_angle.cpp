@@ -1,12 +1,35 @@
+#include "control_config.hpp"
 #include "servo_bus.hpp"
 
 #include <exception>
 #include <iostream>
 #include <string>
-#include <unistd.h>
+
+namespace {
+constexpr const char* kConfigPath = "send_config.json";
+}
 
 int main(int argc, char** argv) {
-    const std::string port = argc > 1 ? argv[1] : "/dev/ttyACM0";
+    // Порт берётся из send_config.json — как у всех остальных программ. Раньше
+    // здесь был жёстко вписанный /dev/ttyACM0, из-за чего base_angle молча
+    // обращался к настоящей руке там, где вызывающий ожидал эмулятор: путь
+    // к устройству не подставлялся ни из конфига, ни из аргументов.
+    std::string port;
+    try {
+        ControlConfig config{};
+        if (!load_config(kConfigPath, config)) {
+            std::cerr << "Failed to load valid " << kConfigPath << std::endl;
+            return 1;
+        }
+        port = config.port;
+    } catch (const std::exception& exception) {
+        std::cerr << exception.what() << std::endl;
+        return 1;
+    }
+
+    if (argc > 1) {
+        port = argv[1];
+    }
 
     try {
         SerialPort serial_port(port);
