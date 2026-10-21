@@ -26,11 +26,20 @@ inline constexpr double kStepsPerRadian = 4095.0 / (2.0 * 3.14159265358979323846
 // сервоприводы не отвечают вовсе.
 inline constexpr unsigned kServoBusBaud = 1000000;
 
-// Окно ожидания возврата устройства после обрыва USB. Адаптер переподключается
-// сам, и узел /dev/ttyACM* появляется не мгновенно: 25 попыток по 200 мс —
-// это пять секунд, за которые устройство обычно успевает вернуться.
-inline constexpr int kReopenAttempts = 25;
+// Окно ожидания возврата устройства после обрыва USB.
+//
+// Адаптер переподключается сам, и узел /dev/ttyACM* появляется не мгновенно.
+// Окно в 60 секунд выбрано по измеренным разрывам: наблюдались окна в 54 и
+// 13 секунд, поэтому и пять, и тридцать секунд проваливались бы на первом
+// же из них. Правится одним числом.
+inline constexpr int kDeviceWaitSeconds = 60;
+
+// Пауза между попытками переоткрыть порт.
 inline constexpr int kReopenDelayMicroseconds = 200000;
+
+// Сколько раз повторить запрос молчащего сервопривода, прежде чем признать
+// его не отвечающим. Порт при этом не трогаем: шина жива, молчит мотор.
+inline constexpr int kSilentReadAttempts = 2;
 
 // SO-101: шесть сервоприводов с номерами 1..6. Живёт здесь, а не в arm_model:
 // это свойство шины, и транспортному слою оно нужно не меньше, чем модели.
@@ -99,7 +108,11 @@ public:
 // такого обрыва, и сообщение об ошибке не отличалось бы от «мотор не ответил».
 class SerialPort {
 public:
-	explicit SerialPort(const std::string& port);
+	// device_wait_seconds — сколько ждать возврата адаптера после обрыва.
+	// По умолчанию kDeviceWaitSeconds; тестам задают меньше, чтобы не ждать
+	// минуту там, где устройство заведомо не вернётся.
+	explicit SerialPort(const std::string& port,
+	                    int device_wait_seconds = kDeviceWaitSeconds);
 	~SerialPort() noexcept;
 
 	SerialPort(const SerialPort&) = delete;
@@ -109,18 +122,30 @@ public:
 
 	[[nodiscard]] int fd() const noexcept { return fd_; }
 	[[nodiscard]] const std::string& path() const noexcept { return port_; }
+	[[nodiscard]] int device_wait_seconds() const noexcept {
+		return device_wait_seconds_;
+	}
 
-	// Переоткрывает порт после обрыва USB. Ждёт переподключения: узел
-	// /dev/ttyACM* появляется не мгновенно. Возвращает false, если устройство
-	// не вернулось.
+	// Переоткрывает порт после обрыва USB: закрывает текущий дескриптор и
+	// открывает путь заново. Одной попыткой, без ожидания: сколько ждать
+	// возврата устройства, решает вызывающий код.
 	bool reopen();
 
 private:
 	std::string port_;
 	int fd_{-1};
+	int device_wait_seconds_{kDeviceWaitSeconds};
 };
 
 int configure_serial_port(const char* port);
+
+// Жив ли порт: на месте ли устройство за дескриптором.
+//
+// Когда адаптер исчезает, дескриптор оказывается повешенным, и ioctl на нём
+// возвращает EIO; на живом порту отвечает. Нужно, чтобы отличить «устройство
+// пропало» от «сервопривод молчит»: в первом случае программа должна дождаться
+// возврата адаптера, во втором — ждать бесполезно.
+[[nodiscard]] bool is_port_alive(int fd);
 
 // Читает границы одного мотора прямо из его регистров. Пустой optional —
 // мотор не ответил.

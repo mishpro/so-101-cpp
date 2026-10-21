@@ -8,7 +8,10 @@
 #include <cstdint>
 #include <cstring>
 #include <array>
+#include <chrono>
+#include <cstdio>
 #include <optional>
+#include <cstdlib>
 #include <poll.h>
 #include <string>
 #include <thread>
@@ -62,9 +65,19 @@ public:
 	// не может быть выполнен, и параметры тогда бессмысленны.
 	void set_error_code(uint8_t code) { error_code_ = code; }
 
+	[[nodiscard]] int served() const { return served_.load(); }
+
+	// Мотор перестаёт отвечать, но шина остаётся живой.
+	void mute(uint8_t servo_id) { muted_ = servo_id; }
+
 	// Обрывает связь, как это делает USB-хаб: master исчезает, и slave-конец
-	// начинает возвращать ошибку вместо данных.
+	// начинает отдавать вместо данных пустоту.
+	//
+	// Сначала поток: пока он жив, он висит в read() на master, и закрытие
+	// дескриптора из чужого потока — гонка. После join() pending read не
+	// остаётся, и slave получает честный EOF, а не EIO.
 	void disconnect() {
+		stop();
 		if (master_ >= 0) {
 			close(master_);
 			master_ = -1;
@@ -89,8 +102,12 @@ private:
 			if (count != static_cast<ssize_t>(request.size())) {
 				continue;
 			}
+			++served_;
 			const uint8_t servo_id = request[2];
 			const uint8_t address = request[5];
+			if (servo_id == muted_) {
+				continue;  // молчим: на запрос не отвечаем вовсе
+			}
 			uint16_t value = 0;
 			if (servo_id >= 1 && servo_id <= 6) {
 				const std::size_t index = servo_id - 1;
@@ -116,6 +133,8 @@ private:
 	std::vector<uint16_t> maximums_;
 	std::vector<uint16_t> present_;
 	uint8_t error_code_{0};
+	uint8_t muted_{0};
+	std::atomic<int> served_{0};
 	std::atomic<bool> running_{false};
 	std::thread thread_;
 };
@@ -153,6 +172,39 @@ PtyPair open_pair() {
 	}
 	return PtyPair(master, slave, name.data());
 }
+
+// Перехватывает stderr на время вызова, чтобы прочитать сообщения
+// программы. Восстанавливает поток и возвращает собранный текст.
+class CapturedStderr {
+public:
+	CapturedStderr() {
+		saved_ = dup(STDERR_FILENO);
+		capture_ = std::tmpfile();
+		if (capture_ != nullptr) {
+			fflush(stderr);
+			dup2(fileno(capture_), STDERR_FILENO);
+		}
+	}
+
+	~CapturedStderr() { restore(); }
+
+	std::string restore() {
+		if (capture_ == nullptr) return {};
+		fflush(stderr);
+		dup2(saved_, STDERR_FILENO);
+		close(saved_);
+		std::rewind(capture_);
+		std::array<char, 4096> buffer{};
+		const size_t read_bytes = std::fread(buffer.data(), 1, buffer.size(), capture_);
+		std::fclose(capture_);
+		capture_ = nullptr;
+		return std::string(buffer.data(), read_bytes);
+	}
+
+private:
+	int saved_{-1};
+	std::FILE* capture_{nullptr};
+};
 
 // Чтение границ через эмулятор: обычный рабочий сценарий.
 void test_read_limits_over_pty() {
@@ -195,7 +247,7 @@ void test_disconnect_is_detected() {
 	ServoEmulator emulator(pair.master, minimums, maximums);
 	emulator.start();
 
-	SerialPort port(pair.path);
+	SerialPort port(pair.path, 2);
 	const std::optional<std::array<ServoLimits, kServoCount>> limits =
 	    read_all_servo_limits(port);
 	CHECK(limits.has_value());
@@ -268,11 +320,129 @@ void test_servo_error_is_not_accepted() {
 	emulator.stop();
 }
 
+
+// Различение «устройство пропало» и «мотор молчит» держится на том, что
+// повешенный порт не отвечает на ioctl. Это и есть признак, по которому
+// программа решает: ждать возврата адаптера или сдаваться.
+void test_port_alive_distinguishes_disconnect() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	SerialPort port(pair.path);
+	CHECK(is_port_alive(port.fd()));
+
+	// Master исчезает — дескриптор slave оказывается повешенным.
+	close(pair.master);
+	pair.master = -1;
+	CHECK(!is_port_alive(port.fd()));
+}
+
+// Молчащий сервопривод при живой шине.
+//
+// Это не обрыв: шина работает, молчит один мотор. Порт в этом случае
+// переоткрывать нельзя — иначе нормальная работа с остальными моторами
+// сбрасывалась бы из-за одного неисправного. И ждать тут нечего: мотор
+// не вернётся сам, сколько бы мы ни ждали адаптер.
+void test_silent_motor_does_not_reopen_port() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.mute(1);
+	emulator.start();
+
+	SerialPort port(pair.path);
+	CapturedStderr captured;
+	const auto started = std::chrono::steady_clock::now();
+	const auto limits = read_all_servo_limits(port);
+	const double elapsed_ms = std::chrono::duration<double, std::milli>(
+	                              std::chrono::steady_clock::now() - started)
+	                              .count();
+	const std::string output = captured.restore();
+
+	CHECK(!limits.has_value());
+	CHECK(output.find("did not answer") != std::string::npos);
+	CHECK(output.find("disconnected") == std::string::npos);
+	// Ожидание адаптера длиной в минуту здесь означало бы, что молчание
+	// мотора принято за обрыв.
+	CHECK(elapsed_ms < 5000.0);
+
+	emulator.stop();
+}
+
+// Адаптер отваливается и возвращается.
+//
+// Настоящий переподключённый адаптер получает тот же путь /dev/ttyACM*, но
+// другое устройство за ним. Это и моделируется: символическая ссылка на
+// псевдо-порт переводится на новую пару, пока старая мертва.
+void test_recovers_after_adapter_returns() {
+	PtyPair first = open_pair();
+	if (first.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+
+	// Путь, который видит программа, — символическая ссылка.
+	const std::string link_path = "/tmp/so101_test_bus_link";
+	std::remove(link_path.c_str());
+	CHECK(symlink(first.path.c_str(), link_path.c_str()) == 0);
+
+	ServoEmulator first_emulator(first.master, minimums, maximums);
+	first_emulator.start();
+
+	SerialPort port(link_path);
+	std::optional<std::array<ServoLimits, kServoCount>> limits;
+
+	// Обрыв: master исчезает, за узлом ничего не остаётся.
+	first_emulator.disconnect();
+	first_emulator.stop();
+
+	// Возврат адаптера: другая пара портов и перевод ссылки на неё.
+	PtyPair second = open_pair();
+	if (second.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		std::remove(link_path.c_str());
+		return;
+	}
+	ServoEmulator second_emulator(second.master, minimums, maximums);
+	second_emulator.start();
+	std::remove(link_path.c_str());
+	CHECK(symlink(second.path.c_str(), link_path.c_str()) == 0);
+
+	// Программа должна дождаться адаптера и прочитать границы.
+	limits = read_all_servo_limits(port);
+	CHECK_MSG(limits.has_value(),
+	          "the program must recover after the adapter returns");
+	if (limits) {
+		for (std::size_t index = 0; index < kServoCount; ++index) {
+			CHECK((*limits)[index].min_position == minimums[index]);
+			CHECK((*limits)[index].max_position == maximums[index]);
+		}
+	}
+
+	std::remove(link_path.c_str());
+	second_emulator.stop();
+}
+
 }  // namespace
 
 int main() {
 	test_read_limits_over_pty();
 	test_servo_error_is_not_accepted();
+	test_port_alive_distinguishes_disconnect();
+	test_silent_motor_does_not_reopen_port();
+	test_recovers_after_adapter_returns();
 	test_disconnect_is_detected();
 	test_reopen_restores_port();
 	return so101_test::finish("servo_bus");
