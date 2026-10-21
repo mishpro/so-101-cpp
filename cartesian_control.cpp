@@ -54,14 +54,14 @@ private:
 };
 
 // Читает все шесть моторов и переводит их в конфигурацию Pinocchio.
-bool read_servo_configuration(const SerialPort& port,
+bool read_servo_configuration(SerialPort& port,
                               const std::array<ServoLimits, kServoCount>& limits,
                               const so101::ArmModel& arm, Eigen::VectorXd& q,
                               std::array<float, kServoCount>& degrees) {
     for (std::size_t index = 0; index < kServoCount; ++index) {
         const int servo_id = static_cast<int>(index) + 1;
         float angle_degrees = 0.0f;
-        if (!read_joint_angle(port.fd(), static_cast<uint8_t>(servo_id),
+        if (!read_joint_angle(port, static_cast<uint8_t>(servo_id),
                               limits[index], angle_degrees)) {
             return false;
         }
@@ -89,7 +89,7 @@ std::array<float, kServoCount> configuration_to_servo_angles(
     return angles;
 }
 
-bool send_configuration(const SerialPort& port,
+bool send_configuration(SerialPort& port,
                         const std::array<ServoLimits, kServoCount>& limits,
                         const ControlConfig& config,
                         const std::array<float, kServoCount>& angles) {
@@ -101,7 +101,7 @@ bool send_configuration(const SerialPort& port,
                                               static_cast<int>(index))));
         // write_joint_angle самостоятельно переводит градусы в отсчёты,
         // добавляет минимальное положение и отправляет пакет через ttyACM.
-        succeeded = write_joint_angle(port.fd(), static_cast<uint8_t>(index + 1),
+        succeeded = write_joint_angle(port, static_cast<uint8_t>(index + 1),
                                       angles[index], joint_speed,
                                       limits[index]) &&
                     succeeded;
@@ -128,7 +128,7 @@ so101::IkParams make_ik_params(const ControlConfig& config) {
     return params;
 }
 
-void control_cartesian(const SerialPort& port,
+void control_cartesian(SerialPort& port,
                        const std::array<ServoLimits, kServoCount>& limits,
                        const ControlConfig& config, so101::ArmModel& arm) {
     const so101::IkParams ik_params = make_ik_params(config);
@@ -236,7 +236,7 @@ int main() {
         // калибровки в проекте нет, а диапазон мотора хранится в нём самом.
         // В URDF те же значения переносит tools/sync_urdf_limits.py.
         std::array<ServoLimits, kServoCount> limits{};
-        if (!read_all_servo_limits(port.fd(), limits.data())) {
+        if (!read_all_servo_limits(port, limits.data())) {
             std::cerr << "Failed to read joint limits from the servos"
                       << std::endl;
             return 1;

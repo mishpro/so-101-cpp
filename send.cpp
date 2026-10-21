@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
         // источник истины: иначе один и тот же физический угол ушёл бы на
         // разные отсчёты в зависимости от того, какая программа пишет.
         ServoLimits limits[6]{};
-        if (!read_all_servo_limits(port_handle.fd(), limits)) {
+        if (!read_all_servo_limits(port_handle, limits)) {
             return 1;
         }
 
@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
         if (disable_torque) {
             bool all_commands_succeeded = true;
             for (uint8_t joint_id = 1; joint_id <= 6; ++joint_id) {
-                if (!disable_servo_torque(port_handle.fd(), joint_id)) {
+                if (!disable_servo_torque(port_handle, joint_id)) {
                     all_commands_succeeded = false;
                 }
                 usleep(10000);
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
                 std::pow(config.joint_speed_divisor, command.first - 1);
             const uint16_t joint_speed = std::max<uint16_t>(
                 1, static_cast<uint16_t>(speed / speed_divisor));
-            if (!write_joint_angle(port_handle.fd(), command.first, command.second,
+            if (!write_joint_angle(port_handle, command.first, command.second,
                                    joint_speed, limits[command.first - 1])) {
                 all_commands_succeeded = false;
             }

@@ -22,6 +22,12 @@ inline constexpr double kStepsPerRadian = 4095.0 / (2.0 * 3.14159265358979323846
 // сервоприводы не отвечают вовсе.
 inline constexpr unsigned kServoBusBaud = 1000000;
 
+// Окно ожидания возврата устройства после обрыва USB. Адаптер переподключается
+// сам, и узел /dev/ttyACM* появляется не мгновенно: 25 попыток по 200 мс —
+// это пять секунд, за которые устройство обычно успевает вернуться.
+inline constexpr int kReopenAttempts = 25;
+inline constexpr int kReopenDelayMicroseconds = 200000;
+
 // Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
 // при которых мотор считает себя нулём градусов и концом хода.
 struct ServoLimits {
@@ -52,6 +58,12 @@ struct ServoLimits {
 
 // Владеет файловым дескриптором tty-порта и закрывает его в деструкторе.
 // Конструктор бросает std::runtime_error, если порт не открылся.
+//
+// Объект умеет переоткрывать порт: адаптер иногда теряет связь с хабом
+// («disabled by hub (EMI?)» в dmesg), после чего устройство переподключается
+// само — старый дескриптор при этом умирает, а путь на короткое время
+// исчезает. Без reopen() программа падала бы на первом же чтении после
+// такого обрыва, и сообщение об ошибке не отличалось бы от «мотор не ответил».
 class SerialPort {
 public:
 	explicit SerialPort(const std::string& port);
@@ -63,8 +75,15 @@ public:
 	SerialPort& operator=(SerialPort&& other) noexcept;
 
 	int fd() const noexcept { return fd_; }
+	const std::string& path() const noexcept { return port_; }
+
+	// Переоткрывает порт после обрыва USB. Ждёт переподключения: узел
+	// /dev/ttyACM* появляется не мгновенно. Возвращает false, если устройство
+	// не вернулось.
+	bool reopen();
 
 private:
+	std::string port_;
 	int fd_;
 };
 
@@ -74,15 +93,15 @@ int configure_serial_port(const char* port);
 // при которых мотор считает себя нулём градусов и концом хода.
 
 // Читает границы одного мотора прямо из его регистров.
-bool read_servo_limits(int fd, uint8_t servo_id, ServoLimits& limits);
+bool read_servo_limits(SerialPort& port, uint8_t servo_id, ServoLimits& limits);
 
 // Читает границы всех шести моторов прямо из регистров. Это единственный
 // источник границ протокола: в URDF те же значения переносятся генератором
 // tools/sync_urdf_limits.py, который читает регистры напрямую.
-bool read_all_servo_limits(int fd, ServoLimits limits[6]);
+bool read_all_servo_limits(SerialPort& port, ServoLimits limits[6]);
 
-bool read_joint_angle(int fd, uint8_t servo_id, const ServoLimits& limits,
-					  float& angle_degrees);
-bool disable_servo_torque(int fd, uint8_t servo_id);
-bool write_joint_angle(int fd, uint8_t servo_id, float angle_degrees,
+bool read_joint_angle(SerialPort& port, uint8_t servo_id,
+					  const ServoLimits& limits, float& angle_degrees);
+bool disable_servo_torque(SerialPort& port, uint8_t servo_id);
+bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
 					   uint16_t speed, const ServoLimits& limits);

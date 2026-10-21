@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
         // Границы берём из регистров моторов, а не из файла: base_angle
         // ничего не откалибровывает, он просто читает текущие положения.
         ServoLimits limits[6]{};
-        if (!read_all_servo_limits(serial_port.fd(), limits)) {
+        if (!read_all_servo_limits(serial_port, limits)) {
             return 1;
         }
 
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
         // SO-101 has six daisy-chained Feetech servos with IDs 1 through 6.
         for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
             float angle = 0.0f;
-            if (read_joint_angle(serial_port.fd(), servo_id,
+            if (read_joint_angle(serial_port, servo_id,
                                  limits[servo_id - 1], angle)) {
                 std::cout << "Joint " << static_cast<int>(servo_id)
                           << " angle: " << angle << " degrees" << std::endl;
