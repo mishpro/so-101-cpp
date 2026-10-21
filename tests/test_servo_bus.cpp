@@ -13,8 +13,10 @@
 #include <optional>
 #include <cstdlib>
 #include <poll.h>
+#include <termios.h>
 #include <string>
 #include <thread>
+#include <fcntl.h>
 #include <unistd.h>
 #include <vector>
 
@@ -65,10 +67,17 @@ public:
 	// не может быть выполнен, и параметры тогда бессмысленны.
 	void set_error_code(uint8_t code) { error_code_ = code; }
 
+	// Сколько первых запросов эмулятор проигнорирует. Так проверяется, что
+	// программа после неудачи переоткрывает порт и повторяет запрос.
+	void skip_requests(int count) { skip_ = count; }
+
 	[[nodiscard]] int served() const { return served_.load(); }
 
 	// Мотор перестаёт отвечать, но шина остаётся живой.
 	void mute(uint8_t servo_id) { muted_ = servo_id; }
+
+	// Молчит вся шина: ни один мотор не отвечает.
+	void mute_all() { mute_everything_ = true; }
 
 	// Обрывает связь, как это делает USB-хаб: master исчезает, и slave-конец
 	// начинает отдавать вместо данных пустоту.
@@ -103,9 +112,13 @@ private:
 				continue;
 			}
 			++served_;
+			if (skip_ > 0) {
+				--skip_;
+				continue;  // молчим: на запрос не отвечаем вовсе
+			}
 			const uint8_t servo_id = request[2];
 			const uint8_t address = request[5];
-			if (servo_id == muted_) {
+			if (mute_everything_ || servo_id == muted_) {
 				continue;  // молчим: на запрос не отвечаем вовсе
 			}
 			uint16_t value = 0;
@@ -134,6 +147,8 @@ private:
 	std::vector<uint16_t> present_;
 	uint8_t error_code_{0};
 	uint8_t muted_{0};
+	bool mute_everything_{false};
+	int skip_{0};
 	std::atomic<int> served_{0};
 	std::atomic<bool> running_{false};
 	std::thread thread_;
@@ -233,8 +248,8 @@ void test_read_limits_over_pty() {
 	emulator.stop();
 }
 
-// Главное: обрыв USB должен распознаваться как обрыв, а не как «мотор не
-// ответил». После разрыва pty чтение slave-конца возвращает EIO.
+// Главное: пропавший адаптер должен распознаваться как пропавший, а не как
+// «мотор не ответил». После разрыва pty чтение slave-конца возвращает EIO.
 void test_disconnect_is_detected() {
 	PtyPair pair = open_pair();
 	if (pair.master < 0) {
@@ -321,32 +336,42 @@ void test_servo_error_is_not_accepted() {
 }
 
 
-// Различение «устройство пропало» и «мотор молчит» держится на том, что
-// повешенный порт не отвечает на ioctl. Это и есть признак, по которому
-// программа решает: ждать возврата адаптера или сдаваться.
-void test_port_alive_distinguishes_disconnect() {
+// Неудачный запрос повторяется на свежеоткрытом порте.
+//
+// Ровно это и происходит с адаптером QinHeng сразу после подачи питания
+// роботу: первый open не получает ответа от сервоприводов, следующий —
+// получает. Повтор запроса на том же дескрипторе не помогает, помогает
+// только свежий open.
+void test_failed_read_is_retried_on_fresh_port() {
 	PtyPair pair = open_pair();
 	if (pair.master < 0) {
 		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
 		return;
 	}
 
-	SerialPort port(pair.path);
-	CHECK(is_port_alive(port.fd()));
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.skip_requests(1);  // первый запрос уходит в никуда
+	emulator.start();
 
-	// Master исчезает — дескриптор slave оказывается повешенным.
-	close(pair.master);
-	pair.master = -1;
-	CHECK(!is_port_alive(port.fd()));
+	SerialPort port(pair.path);
+	const std::optional<std::array<ServoLimits, kServoCount>> limits =
+	    read_all_servo_limits(port);
+	CHECK_MSG(limits.has_value(),
+	          "the program must retry the request after a failed read");
+	CHECK_MSG(emulator.served() >= 2,
+	          "the request must be repeated after a failed read");
+
+	emulator.stop();
 }
 
 // Молчащий сервопривод при живой шине.
 //
-// Это не обрыв: шина работает, молчит один мотор. Порт в этом случае
-// переоткрывать нельзя — иначе нормальная работа с остальными моторами
-// сбрасывалась бы из-за одного неисправного. И ждать тут нечего: мотор
-// не вернётся сам, сколько бы мы ни ждали адаптер.
-void test_silent_motor_does_not_reopen_port() {
+// Это не обрыв: шина работает, молчит один мотор. Узел порта на месте,
+// поэтому переоткрытие проходит мгновенно и ждать адаптер нечего: мотор
+// не вернётся сам, сколько бы мы ни ждали.
+void test_silent_motor_fails_fast() {
 	PtyPair pair = open_pair();
 	if (pair.master < 0) {
 		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
@@ -371,9 +396,89 @@ void test_silent_motor_does_not_reopen_port() {
 	CHECK(!limits.has_value());
 	CHECK(output.find("did not answer") != std::string::npos);
 	CHECK(output.find("disconnected") == std::string::npos);
+	CHECK(output.find("is not responding") == std::string::npos);
 	// Ожидание адаптера длиной в минуту здесь означало бы, что молчание
-	// мотора принято за обрыв.
-	CHECK(elapsed_ms < 5000.0);
+	// мотора принято за обрыв. Две попытки по 20 чтений, каждое с
+	// hundredмиллисекундным таймаутом tty, — это около четырёх секунд.
+	CHECK(elapsed_ms < 8000.0);
+
+	emulator.stop();
+}
+
+// Порт открывается на правильной скорости, что бы на нём ни было до этого.
+//
+// Регрессия: cfsetospeed ждёт закодированную константу B1000000, а не число
+// 1000000. С числом вызов падает с EINVAL, скорость остаётся прежней, и порт
+// молча работает на дефолтных 9600 бод. Сервоприводы на 9600 бод не отвечают
+// вовсе, и после переподключения адаптера (когда порт откатывается к
+// дефолтам) программа упиралась в «мотор не ответил».
+void test_port_is_opened_at_bus_speed() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	// Имитируем свежеподключённое устройство: порт на дефолтных 9600 бод.
+	const int raw = open(pair.path.c_str(), O_RDWR | O_NOCTTY);
+	if (raw < 0) {
+		CHECK_MSG(false, "could not open the pseudo-terminal directly");
+		return;
+	}
+	termios slow{};
+	tcgetattr(raw, &slow);
+	cfsetospeed(&slow, B9600);
+	cfsetispeed(&slow, B9600);
+	tcsetattr(raw, TCSANOW, &slow);
+	close(raw);
+
+	SerialPort port(pair.path);
+	termios actual{};
+	CHECK_MSG(tcgetattr(port.fd(), &actual) == 0,
+	          "could not read the port settings back");
+	const speed_t speed = cfgetispeed(&actual);
+	CHECK_MSG(speed == B1000000 || speed == kServoBusBaud,
+	          "the port must be opened at the bus speed");
+
+	// И связь при этом работает.
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.start();
+	const std::optional<std::array<ServoLimits, kServoCount>> limits =
+	    read_all_servo_limits(port);
+	CHECK(limits.has_value());
+	emulator.stop();
+}
+
+// Молчит вся шина: ни один мотор не отвечает.
+//
+// Молчание одного мотора и молчание всей шины снаружи выглядят одинаково.
+// Различить их можно, спросив соседнего мотора: молчит и сосед — значит
+// дело в связи, и программа обязана сказать про шину, а не про мотор.
+void test_dead_bus_is_reported_as_bus_problem() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.mute_all();
+	emulator.start();
+
+	SerialPort port(pair.path, 2);
+	CapturedStderr captured;
+	const auto limits = read_all_servo_limits(port);
+	const std::string output = captured.restore();
+
+	CHECK(!limits.has_value());
+	CHECK_MSG(output.find("is not responding") != std::string::npos,
+	          "a dead bus must be reported as a bus problem");
+	CHECK_MSG(output.find("did not answer") == std::string::npos,
+	          "a dead bus must not be reported as a dead motor");
 
 	emulator.stop();
 }
@@ -439,9 +544,11 @@ void test_recovers_after_adapter_returns() {
 
 int main() {
 	test_read_limits_over_pty();
+	test_port_is_opened_at_bus_speed();
 	test_servo_error_is_not_accepted();
-	test_port_alive_distinguishes_disconnect();
-	test_silent_motor_does_not_reopen_port();
+	test_failed_read_is_retried_on_fresh_port();
+	test_silent_motor_fails_fast();
+	test_dead_bus_is_reported_as_bus_problem();
 	test_recovers_after_adapter_returns();
 	test_disconnect_is_detected();
 	test_reopen_restores_port();
