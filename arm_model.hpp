@@ -92,12 +92,19 @@ struct IkParams {
 	int max_iterations{100};
 	double position_tolerance_m{0.005};
 	double max_joint_step_rad{0.1};
+	// Допуск по направлению инструмента, в радианах. Учитывается только
+	// задачей с ограничением ориентации; для позиционной задачи не значим.
+	double orientation_tolerance_rad{0.001};
 };
 
 struct IkResult {
 	Eigen::VectorXd q{Eigen::VectorXd::Zero(6)};
 	double initial_error_m{0.0};
 	double final_error_m{0.0};
+	// Ошибка по направлению инструмента, в радианах. Для позиционной задачи
+	// равна нулю: направление там не ограничивалось.
+	double initial_orientation_error_rad{0.0};
+	double final_orientation_error_rad{0.0};
 	bool converged{false};
 	int iterations{0};
 };
@@ -108,5 +115,25 @@ struct IkResult {
 [[nodiscard]] IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,
                                 const Eigen::VectorXd& initial_q,
                                 const IkParams& params);
+
+// Решает задачу с ограничением ориентации: точка TCP должна попасть в
+// target, а ось инструмента (Z-ось целевого фрейма в мире) — совпасть с
+// tool_direction.
+//
+// Задача на четыре независимых ограничения (три координаты точки и высота
+// направления; азимут направления задан самой позицией точки) при четырёх
+// суставах, поэтому решение единственно — в отличие от позиционной задачи,
+// где остаётся лишняя степень свободы «локоть вверх/вниз».
+//
+// tool_direction — единичный вектор в мире; длина не важна, направление
+// разворачивается к нужному.
+[[nodiscard]] IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,
+                                const Eigen::Vector3d& tool_direction,
+                                const Eigen::VectorXd& initial_q,
+                                const IkParams& params);
+
+// Ось инструмента в мире: Z-ось целевого фрейма. Это направление, в
+// котором «смотрит» карандаш.
+[[nodiscard]] Eigen::Vector3d tool_axis(const ArmModel& arm);
 
 }  // namespace so101

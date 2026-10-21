@@ -545,19 +545,32 @@ std::optional<float> read_joint_angle(SerialPort& port, uint8_t servo_id,
 }
 
 bool disable_servo_torque(SerialPort& port, uint8_t servo_id) {
-    if (!write_byte_register(port, servo_id, Register::torque_enable, 0)) {
-        std::cerr << "Failed to disable torque on Joint "
-                  << static_cast<int>(servo_id) << '\n';
-        return false;
-    }
+	if (!write_byte_register(port, servo_id, Register::torque_enable, 0)) {
+		std::cerr << "Failed to disable torque on Joint "
+		          << static_cast<int>(servo_id) << '\n';
+		return false;
+	}
 
-    std::cout << "Torque disabled on Joint "
-              << static_cast<int>(servo_id) << '\n';
-    return true;
+	std::cout << "Torque disabled on Joint "
+	          << static_cast<int>(servo_id) << '\n';
+	return true;
+}
+
+bool enable_servo_torque(SerialPort& port, uint8_t servo_id) {
+	if (!write_byte_register(port, servo_id, Register::torque_enable, 1)) {
+		std::cerr << "Failed to enable torque on Joint "
+		          << static_cast<int>(servo_id) << '\n';
+		return false;
+	}
+
+	std::cout << "Torque enabled on Joint "
+	          << static_cast<int>(servo_id) << '\n';
+	return true;
 }
 
 bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
-                       uint16_t speed, const ServoLimits& limits) {
+                       uint16_t speed, const ServoLimits& limits,
+                       bool announce) {
     if (!std::isfinite(angle_degrees) || angle_degrees < 0.0f) return false;
 
     const float max_angle = limits.span_degrees();
@@ -582,8 +595,13 @@ bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
         return false;
     }
 
-    std::cout << "Joint " << static_cast<int>(servo_id)
-              << " commanded to " << angle_degrees << " degrees ("
-              << steps << " steps, speed " << speed << ").\n";
+    // Объявление каждой команды по шести моторам превращает рисование круга
+    // в поток из двухсот строк, поэтому программы с плотным циклом его
+    // выключают и печатают своё.
+    if (announce) {
+        std::cout << "Joint " << static_cast<int>(servo_id)
+                  << " commanded to " << angle_degrees << " degrees ("
+                  << steps << " steps, speed " << speed << ").\n";
+    }
     return true;
 }

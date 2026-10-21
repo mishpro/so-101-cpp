@@ -376,6 +376,162 @@ void test_ik_respects_joint_limits(const so101::ArmModel& model_template) {
     }
 }
 
+// Угловые строки якобиана LOCAL_WORLD_ALIGNED выражены в мире.
+//
+// Проверяется численным дифференцированием поворота фрейма: производная
+// угла поворота даёт ось в мире. Знак в формуле ограничения направления
+// держится на этой проверке, поэтому она обязана быть в репозитории, а не
+// только в голове автора.
+void test_frame_jacobian_angular_rows_match_finite_differences(
+    const so101::ArmModel& model_template) {
+    so101::ArmModel arm = model_template;
+
+    const Eigen::VectorXd starts[] = {
+        pinocchio::neutral(arm.model),
+        [&arm] {
+            Eigen::VectorXd q = pinocchio::neutral(arm.model);
+            for (std::size_t index = 0; index < kIkJointCount; ++index) {
+                const auto joint = arm.model.joints[arm.ik_joints[index]];
+                q[joint.idx_q()] =
+                    0.4 * arm.model.upperPositionLimit[joint.idx_q()];
+            }
+            q[arm.model.joints[arm.servo_joints[4]].idx_q()] = 0.6;
+            return q;
+        }(),
+        [&arm] {
+            Eigen::VectorXd q = pinocchio::neutral(arm.model);
+            for (std::size_t index = 0; index < kIkJointCount; ++index) {
+                const auto joint = arm.model.joints[arm.ik_joints[index]];
+                q[joint.idx_q()] =
+                    -0.6 * arm.model.lowerPositionLimit[joint.idx_q()];
+            }
+            q[arm.model.joints[arm.servo_joints[4]].idx_q()] = -0.9;
+            return q;
+        }(),
+    };
+
+    constexpr double epsilon = 1e-6;
+    pinocchio::Data::Matrix6x jacobian(6, arm.model.nv);
+
+    for (const Eigen::VectorXd& q : starts) {
+        pinocchio::computeJointJacobians(arm.model, arm.data, q);
+        pinocchio::getFrameJacobian(arm.model, arm.data, arm.frame_id,
+                                    pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+
+        for (std::size_t index = 0; index < kIkJointCount; ++index) {
+            const auto joint = arm.model.joints[arm.ik_joints[index]];
+            Eigen::VectorXd plus = q;
+            Eigen::VectorXd minus = q;
+            plus[joint.idx_q()] += epsilon;
+            minus[joint.idx_q()] -= epsilon;
+
+            pinocchio::Data plus_data(arm.model);
+            pinocchio::Data minus_data(arm.model);
+            pinocchio::forwardKinematics(arm.model, plus_data, plus);
+            pinocchio::updateFramePlacements(arm.model, plus_data);
+            pinocchio::forwardKinematics(arm.model, minus_data, minus);
+            pinocchio::updateFramePlacements(arm.model, minus_data);
+
+            // Разность поворотов плюс и минус — поворот на 2*epsilon вокруг
+            // оси сустава. Векторно-векторное произведение этого поворота
+            // даёт ось в мире, умноженную на 2*sin(2*epsilon).
+            const Eigen::Matrix3d difference =
+                plus_data.oMf[arm.frame_id].rotation() *
+                minus_data.oMf[arm.frame_id].rotation().transpose();
+            const Eigen::Vector3d axis_world(
+                (difference(2, 1) - difference(1, 2)) / (4.0 * epsilon),
+                (difference(0, 2) - difference(2, 0)) / (4.0 * epsilon),
+                (difference(1, 0) - difference(0, 1)) / (4.0 * epsilon));
+
+            const Eigen::Vector3d angular_row = jacobian.bottomRows(3).col(
+                joint.idx_v());
+            CHECK_NEAR((angular_row - axis_world).cwiseAbs().maxCoeff(), 0.0,
+                       1e-5);
+        }
+    }
+}
+
+// Задача с ограничением ориентации: точка попадает в цель, ось инструмента
+// совпадает с заданной.
+void test_ik_with_direction_keeps_tool_vertical(
+    const so101::ArmModel& model_template) {
+    so101::ArmModel arm = model_template;
+    so101::IkParams params;
+    params.max_iterations = 300;
+    params.position_tolerance_m = 0.001;
+    params.orientation_tolerance_rad = 0.01;
+
+    // Ось карандаша смотрит вниз: Z-ось TCP в мире равна (0, 0, -1).
+    const Eigen::Vector3d down{0.0, 0.0, -1.0};
+    const Eigen::Vector3d target{0.25, 0.0, 0.02};
+
+    Eigen::VectorXd start = pinocchio::neutral(arm.model);
+    start[arm.model.joints[arm.ik_joints[1]].idx_q()] = 0.3;
+    start[arm.model.joints[arm.ik_joints[2]].idx_q()] = 0.9;
+    start[arm.model.joints[arm.ik_joints[3]].idx_q()] = 0.6;
+
+    const so101::IkResult result =
+        so101::solve_ik(arm, target, down, start, params);
+    CHECK(result.converged);
+    CHECK(result.final_error_m <= params.position_tolerance_m);
+    CHECK(result.final_orientation_error_rad <= params.orientation_tolerance_rad);
+
+    // Ось инструмента в найденной позе — вертикально вниз.
+    pinocchio::forwardKinematics(arm.model, arm.data, result.q);
+    pinocchio::updateFramePlacements(arm.model, arm.data);
+    const Eigen::Vector3d axis = so101::tool_axis(arm);
+    CHECK_NEAR(std::abs(axis.dot(down)), 1.0, 1e-3);
+
+    // Точка TCP — в цели.
+    const Eigen::Vector3d reached = arm.data.oMf[arm.frame_id].translation();
+    CHECK_NEAR((reached - target).norm(), 0.0, params.position_tolerance_m);
+}
+
+// Ограничение ориентации снимает неоднозначность «локоть вверх/вниз»:
+// в позиционной задаче решение не единственно, а с ограничением
+// направления — да.
+void test_ik_with_direction_is_unique(const so101::ArmModel& model_template) {
+    so101::ArmModel arm = model_template;
+    so101::IkParams params;
+    params.max_iterations = 300;
+    params.position_tolerance_m = 0.001;
+    params.orientation_tolerance_rad = 0.01;
+
+    const Eigen::Vector3d down{0.0, 0.0, -1.0};
+    const Eigen::Vector3d target{0.22, 0.0, 0.05};
+
+    // Несколько заведомо разных начальных поз: решение должно сойтись
+    // в одно и то же.
+    std::mt19937 generator(7);
+    std::uniform_real_distribution<double> spread(-0.6, 0.6);
+    bool first = true;
+    Eigen::VectorXd reference = Eigen::VectorXd::Zero(arm.model.nv);
+
+    for (int attempt = 0; attempt < 12; ++attempt) {
+        so101::ArmModel attempt_arm = arm;
+        Eigen::VectorXd start = pinocchio::neutral(attempt_arm.model);
+        for (std::size_t index = 0; index < kIkJointCount; ++index) {
+            const auto joint = attempt_arm.model.joints[attempt_arm.ik_joints[index]];
+            start[joint.idx_q()] = spread(generator);
+        }
+        const so101::IkResult result =
+            so101::solve_ik(attempt_arm, target, down, start, params);
+        if (!result.converged) continue;
+        if (first) {
+            reference = result.q;
+            first = false;
+            continue;
+        }
+        for (std::size_t index = 0; index < kIkJointCount; ++index) {
+            const auto joint = attempt_arm.model.joints[attempt_arm.ik_joints[index]];
+            CHECK_NEAR(std::abs(result.q[joint.idx_q()] -
+                                reference[joint.idx_q()]),
+                       0.0, 0.35);
+        }
+    }
+    CHECK(!first);
+}
+
 }  // namespace
 
 int main() {
@@ -396,8 +552,11 @@ int main() {
     test_ik_ignores_wrist_roll(arm);
     test_ik_respects_joint_limits(arm);
     test_frame_jacobian_matches_finite_differences(arm);
+    test_frame_jacobian_angular_rows_match_finite_differences(arm);
     test_ik_tracks_cartesian_steps(arm);
     test_ik_never_makes_things_worse(arm);
+    test_ik_with_direction_keeps_tool_vertical(arm);
+    test_ik_with_direction_is_unique(arm);
 
     return so101_test::finish("arm_model");
 }

@@ -14,7 +14,8 @@
   4. send --show-limits показывает регистры рядом с URDF и вердикт;
   5. маркер --show-limits не путает недоступный URDF минимум мотора;
   6. send --show-limits честно отказывается, если URDF недоступен;
-  7. генератор URDF читает границы с шины и перегенерирует файл.
+  7. генератор URDF читает границы с шины и перегенерирует файл;
+  8. захват плоскости и рисование круга проходят весь путь по шине.
 
 Запуск: python3 tests/manual/pty_smoke_test.py
 """
@@ -30,7 +31,10 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from fake_servo_bus import FakeServoBus  # noqa: E402
+from fake_servo_bus import (  # noqa: E402
+    REG_GOAL_POSITION,
+    FakeServoBus,
+)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 # Генератору нужен pyserial, которого нет в системном Python. Если рядом с
@@ -98,7 +102,8 @@ def build_config(port: str, urdf: pathlib.Path | None = None) -> str:
     return str(workspace)
 
 
-def run(binary: str, workspace: str, *arguments: str) -> subprocess.CompletedProcess:
+def run(binary: str, workspace: str, *arguments: str,
+        stdin_data: str | None = None) -> subprocess.CompletedProcess:
     """Запускает программу в подготовленном каталоге.
 
     Порт берётся из send_config.json внутри workspace. Раньше base_angle этот
@@ -119,7 +124,8 @@ def run(binary: str, workspace: str, *arguments: str) -> subprocess.CompletedPro
         capture_output=True,
         text=True,
         timeout=60,
-        stdin=subprocess.DEVNULL,
+        input=stdin_data if stdin_data is not None else None,
+        stdin=subprocess.DEVNULL if stdin_data is None else None,
     )
 
 
@@ -307,6 +313,81 @@ def run_generator_again(previous: pathlib.Path) -> str:
     return output.read_text() if output.exists() else previous.read_text() + " (нет файла)"
 
 
+def steps_for_angles(angles_deg: list[float]) -> list[int]:
+    """Переводит углы URDF в отсчёты мотора для эмулятора.
+
+    Угол мотора отсчитывается от его нуля, а нуль мотора — это нижняя
+    граница URDF: так же, как это делает send.
+    """
+    import xml.etree.ElementTree as ElementTree
+
+    root = ElementTree.parse(URDF).getroot()
+    by_name = {
+        joint.get("name"): joint.find("limit")
+        for joint in root.iter("joint")
+        if joint.get("type") == "revolute"
+    }
+    order = ["shoulder_pan", "shoulder_lift", "elbow_flex",
+             "wrist_flex", "wrist_roll", "gripper"]
+    limits = urdf_limits()
+    steps = []
+    for index, name in enumerate(order):
+        # Границы в URDF в радианах, а углы мотора считаются в градусах.
+        lower = math.degrees(float(by_name[name].get("lower")))
+        motor_degrees = angles_deg[index] - lower
+        steps.append(limits[index][0] +
+                     round(motor_degrees * 4095.0 / 360.0))
+    return steps
+
+
+def scenario_draw_circle_on_fake_bus() -> None:
+    print("\n8. Рисование круга на эмуляторе шины")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    # Поза не вытянутая: у вытянутой руки вертикальный инструмент
+    # недостижим (рабочая область кончается), и проверять было бы нечего.
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True) as bus:
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        # Захват плоскости: оператор «нажимает Enter» (ввод подаётся через
+        # stdin), программа должна записать файл плоскости.
+        # Допуск наклона максимальный: эмулятор стоит в произвольной позе,
+        # и проверить тут надо путь по шине, а не точность захвата.
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0,
+              "захват плоскости на эмуляторе завершился успешно",
+              capture.stderr.strip()[:400])
+        check(plane_path.exists(), "файл плоскости записан")
+        if plane_path.exists():
+            plane = json.loads(plane_path.read_text())
+            check("tcp_height_m" in plane, "в файле плоскости есть высота TCP")
+            check("tilt_deg" in plane, "в файле плоскости есть наклон")
+
+        # Рисование: центр окружности — в точке касания, так что окружность
+        # рядом с текущей позой и IK обязан сойтись.
+        if not plane_path.exists():
+            check(False, "файл плоскости существует для рисования")
+            return
+        plane = json.loads(plane_path.read_text())
+        before = len(bus.writes_to(REG_GOAL_POSITION))
+        draw = run("draw_circle", workspace,
+                   "--center", f"{plane['contact_x_m']:.4f}",
+                   f"{plane['contact_y_m']:.4f}",
+                   "--radius", "0.02", "--points", "8",
+                   "--plane", str(plane_path), "--no-confirm", stdin_data="\n")
+        check(draw.returncode == 0, "рисование круга на эмуляторе завершилось",
+              draw.stderr.strip()[:400])
+        after = len(bus.writes_to(REG_GOAL_POSITION))
+        check(after > before, "в моторы ушли цели по окружности",
+              f"{before} -> {after}")
+
+
 def main() -> int:
     if not (BUILD / "cartesian_control").exists():
         raise SystemExit("сначала соберите проект: cmake --build build")
@@ -322,6 +403,7 @@ def main() -> int:
     scenario_marker_ignores_absolute_minimum()
     scenario_show_limits_without_urdf()
     scenario_generator_reads_bus()
+    scenario_draw_circle_on_fake_bus()
 
     print()
     if failures:

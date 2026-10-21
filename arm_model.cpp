@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 namespace so101 {
@@ -26,6 +27,182 @@ int checked_index(int servo_id) {
 	return (servo_id < 1 || servo_id > static_cast<int>(kServoCount))
 	           ? -1
 	           : servo_id - 1;
+}
+
+// Матрица кососимметричного произведения: v × w = skew(v) · w.
+Eigen::Matrix3d skew_matrix(const Eigen::Vector3d& v) {
+	Eigen::Matrix3d m;
+	m << 0.0, -v.z(), v.y(),
+	     v.z(), 0.0, -v.x(),
+	     -v.y(), v.x(), 0.0;
+	return m;
+}
+
+// Решатель Damped Least Squares.
+//
+// Rows = 3 — только позиция точки; Rows = 6 — позиция и направление
+// инструмента.
+//
+// Ветка для трёх строк повторяет прежний решатель как есть: та же
+// арифметика, тот же порядок вычислений, тот же результат. Общий код с
+// параметром шаблона даёт то же самое, но переписывать рабочий путь
+// решателя ради «унификации» незачем: цена ошибки тут — неверная траектория
+// руки, а не дублирование тридцати строк.
+template <int Rows>
+IkResult solve_ik_impl(ArmModel& arm, const Eigen::Vector3d& target,
+                        const std::optional<Eigen::Vector3d>& tool_direction,
+                        const Eigen::VectorXd& initial_q, const IkParams& params) {
+	IkResult result;
+	result.q = initial_q;
+
+	const auto position_error = [&arm, &target]() {
+		return target - arm.data.oMf[arm.frame_id].translation();
+	};
+	// Остаток по направлению: часть желаемого направления, перпендикулярная
+	// текущей оси инструмента. Поворот вокруг самой оси направление не
+	// меняет, поэтому такая составляющая смысла не имеет.
+	//
+	// Желаемое направление нормируется один раз и в обычный Vector3d: внутри
+	// цикла оно не меняется, а ленивое выражение normalized() в этой задаче
+	// лишнее.
+	Eigen::Vector3d desired_direction = Eigen::Vector3d::UnitZ();
+	if (tool_direction) {
+		const Eigen::Vector3d raw = *tool_direction;
+		const double length = raw.norm();
+		if (length > 0.0) {
+			desired_direction = raw / length;
+		}
+	}
+	const auto direction_error = [&arm, &desired_direction]() {
+		const Eigen::Vector3d axis = tool_axis(arm);
+		// Результат материализуется в обычный вектор: возвращать выражение
+		// Eigen нельзя — оно ссылается на локальную axis, которая умирает
+		// вместе с лямбдой. Вызывающий получал мусор (в отладочной сборке
+		// случайно правильный, в оптимизированной — нет).
+		return Eigen::Vector3d(
+		    desired_direction - axis.dot(desired_direction) * axis);
+	};
+
+	pinocchio::forwardKinematics(arm.model, arm.data, result.q);
+	pinocchio::updateFramePlacements(arm.model, arm.data);
+	result.initial_error_m = position_error().norm();
+	result.final_error_m = result.initial_error_m;
+	if constexpr (Rows == 6) {
+		result.initial_orientation_error_rad = direction_error().norm();
+		result.final_orientation_error_rad =
+		    result.initial_orientation_error_rad;
+	}
+	result.converged =
+	    result.final_error_m <= params.position_tolerance_m &&
+	    result.final_orientation_error_rad <= params.orientation_tolerance_rad;
+
+	// Якобиан фрейма: шесть строк (xyz) и по одному столбцу на степень
+	// свободы. Data::Matrix6x здесь не годится: у неё фиксированные шесть
+	// столбцов, и при nv != 6 getFrameJacobian писал бы за её пределы —
+	// в релизной сборке без проверок Eigen это тихая порча памяти.
+	Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian(6, arm.model.nv);
+
+	// Строки задачи сравниваются в своих допусках: остаток в единицу означает
+	// «в допуске». Строка позиции остаётся единичной, строка направления
+	// домножается на отношение допусков — так вклады сравнимы.
+	double direction_weight = 1.0;
+	if constexpr (Rows == 6) {
+		direction_weight = params.position_tolerance_m /
+		                   params.orientation_tolerance_rad;
+	}
+
+	// Несколько итераций Damped Least Squares позволяют приблизить конечную
+	// точку к цели точнее, чем один шаг за вызов.
+	while (result.iterations < params.max_iterations && !result.converged) {
+		// Именно эта пара вызовов даёт правильный якобиан фрейма. Вариант
+		// computeFrameJacobian(model, data, q, frame_id, rf, J) в pinocchio
+		// 4.1.0 возвращает матрицу, не совпадающую с производной прямой
+		// кинематики: нормы столбцов расходились в разы, и решатель уходил
+		// от цели. Совпадение проверяется тестом test_frame_jacobian_matches_finite_differences.
+		pinocchio::computeJointJacobians(arm.model, arm.data, result.q);
+		pinocchio::getFrameJacobian(arm.model, arm.data, arm.frame_id,
+		                            pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
+		const Eigen::Vector3d error = position_error();
+
+		// Берём только линейные строки якобиана и только суставы, входящие в
+		// IK: wrist_roll и gripper исключены намеренно (см. kIkJointCount).
+		//
+		// Строки копируются в обычные векторы перед записью. Ленивое
+		// выражение Eigen, присваиваемое в под-блок, — место, где значение
+		// легко взять не оттуда, откуда ожидаешь; здесь это стоило долгого
+		// поиска, и материализация стоит двух строк.
+		Eigen::MatrixXd task_jacobian(Rows, static_cast<Eigen::Index>(kIkJointCount));
+		for (std::size_t index = 0; index < kIkJointCount; ++index) {
+			const auto joint = arm.model.joints[arm.ik_joints[index]];
+			const Eigen::Vector3d linear = jacobian.topRows(3).col(joint.idx_v());
+			task_jacobian.col(index).topRows(3) = linear;
+		}
+		Eigen::VectorXd task_error(Rows);
+		task_error.head<3>() = error;
+		if constexpr (Rows == 6) {
+			// Ось инструмента меняется от угловой скорости: d_dot = ω × d =
+			// -skew(d) · ω. Угловые строки якобиана LOCAL_WORLD_ALIGNED
+			// выражены в мире — проверено тестом
+			// test_frame_jacobian_angular_rows_match_finite_differences.
+			const Eigen::Vector3d axis = tool_axis(arm);
+			const Eigen::Matrix3d skew = skew_matrix(axis);
+			for (std::size_t index = 0; index < kIkJointCount; ++index) {
+				const auto joint = arm.model.joints[arm.ik_joints[index]];
+				const Eigen::Vector3d angular =
+				    -skew * jacobian.bottomRows(3).col(joint.idx_v());
+				task_jacobian.col(index).bottomRows(3) = angular;
+			}
+			task_jacobian.bottomRows<3>() *= direction_weight;
+			task_error.tail<3>() = direction_weight * direction_error();
+		}
+
+		// Damped Least Squares устойчив к вырожденным положениям якобиана.
+		Eigen::Matrix<double, Rows, Rows> system =
+		    task_jacobian * task_jacobian.transpose();
+		system += params.damping * params.damping *
+		          Eigen::Matrix<double, Rows, Rows>::Identity();
+		Eigen::VectorXd dq_arm =
+		    task_jacobian.transpose() * system.ldlt().solve(task_error);
+
+		// Шаг ограничивается целиком, а не по одному суставу: покоординатное
+		// ограничение меняет направление dq, и решатель перестаёт сходиться
+		// (ошибка растёт от итерации к итерации). Однородное масштабирование
+		// сохраняет направление решения.
+		const double largest_step = dq_arm.cwiseAbs().maxCoeff();
+		if (largest_step > params.max_joint_step_rad) {
+			dq_arm *= params.max_joint_step_rad / largest_step;
+		}
+
+		Eigen::VectorXd dq = Eigen::VectorXd::Zero(arm.model.nv);
+		for (std::size_t index = 0; index < kIkJointCount; ++index) {
+			dq[arm.model.joints[arm.ik_joints[index]].idx_v()] = dq_arm[index];
+		}
+
+		// integrate обновляет конфигурацию Pinocchio. После каждой итерации
+		// ограничиваем суставы диапазонами из URDF.
+		result.q = pinocchio::integrate(arm.model, result.q, dq);
+		for (std::size_t index = 0; index < kIkJointCount; ++index) {
+			const auto joint = arm.model.joints[arm.ik_joints[index]];
+			result.q[joint.idx_q()] =
+			    std::clamp(result.q[joint.idx_q()],
+			               arm.model.lowerPositionLimit[joint.idx_q()],
+			               arm.model.upperPositionLimit[joint.idx_q()]);
+		}
+		++result.iterations;
+
+		pinocchio::forwardKinematics(arm.model, arm.data, result.q);
+		pinocchio::updateFramePlacements(arm.model, arm.data);
+		result.final_error_m = position_error().norm();
+		if constexpr (Rows == 6) {
+			result.final_orientation_error_rad = direction_error().norm();
+		}
+		result.converged =
+		    result.final_error_m <= params.position_tolerance_m &&
+		    result.final_orientation_error_rad <=
+		        params.orientation_tolerance_rad;
+	}
+
+	return result;
 }
 
 }  // namespace
@@ -143,86 +320,23 @@ bool check_joint_limits(const ArmModel& arm,
 
 IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,
                   const Eigen::VectorXd& initial_q, const IkParams& params) {
-	IkResult result;
-	result.q = initial_q;
+	return solve_ik_impl<3>(arm, target, std::nullopt, initial_q, params);
+}
 
-	const auto current_error = [&arm, &target]() {
-		return (target - arm.data.oMf[arm.frame_id].translation()).norm();
-	};
+IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,
+                  const Eigen::Vector3d& tool_direction,
+                  const Eigen::VectorXd& initial_q, const IkParams& params) {
+	return solve_ik_impl<6>(arm, target, tool_direction, initial_q, params);
+}
 
-	pinocchio::forwardKinematics(arm.model, arm.data, result.q);
-	pinocchio::updateFramePlacements(arm.model, arm.data);
-	result.initial_error_m = current_error();
-	result.final_error_m = result.initial_error_m;
-	result.converged = result.final_error_m <= params.position_tolerance_m;
-
-	// Якобиан фрейма: шесть строк (xyz) и по одному столбцу на степень
-	// свободы. Data::Matrix6x здесь не годится: у неё фиксированные шесть
-	// столбцов, и при nv != 6 getFrameJacobian писал бы за её пределы —
-	// в релизной сборке без проверок Eigen это тихая порча памяти.
-	Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian(6, arm.model.nv);
-
-	// Несколько итераций Damped Least Squares позволяют приблизить конечную
-	// точку к цели точнее, чем один шаг за вызов.
-	while (result.iterations < params.max_iterations && !result.converged) {
-		// Именно эта пара вызовов даёт правильный якобиан фрейма. Вариант
-		// computeFrameJacobian(model, data, q, frame_id, rf, J) в pinocchio
-		// 4.1.0 возвращает матрицу, не совпадающую с производной прямой
-		// кинематики: нормы колонок расходились в разы, и решатель уходил
-		// от цели. Совпадение проверяется тестом test_frame_jacobian_matches_finite_differences.
-		pinocchio::computeJointJacobians(arm.model, arm.data, result.q);
-		pinocchio::getFrameJacobian(arm.model, arm.data, arm.frame_id,
-		                            pinocchio::LOCAL_WORLD_ALIGNED, jacobian);
-		const Eigen::Vector3d error =
-		    target - arm.data.oMf[arm.frame_id].translation();
-
-		// Берём только линейные строки якобиана и только суставы, входящие в
-		// IK: wrist_roll и gripper исключены намеренно (см. kIkJointCount).
-		Eigen::MatrixXd arm_jacobian(3, static_cast<Eigen::Index>(kIkJointCount));
-		for (std::size_t index = 0; index < kIkJointCount; ++index) {
-			arm_jacobian.col(index) = jacobian.topRows(3).col(
-			    arm.model.joints[arm.ik_joints[index]].idx_v());
-		}
-
-		// Damped Least Squares устойчив к вырожденным положениям якобиана.
-		Eigen::Matrix3d system = arm_jacobian * arm_jacobian.transpose();
-		system += params.damping * params.damping * Eigen::Matrix3d::Identity();
-		Eigen::VectorXd dq_arm =
-		    arm_jacobian.transpose() * system.ldlt().solve(error);
-
-		// Шаг ограничивается целиком, а не по одному суставу: покоординатное
-		// ограничение меняет направление dq, и решатель перестаёт сходиться
-		// (ошибка растёт от итерации к итерации). Однородное масштабирование
-		// сохраняет направление решения.
-		const double largest_step = dq_arm.cwiseAbs().maxCoeff();
-		if (largest_step > params.max_joint_step_rad) {
-			dq_arm *= params.max_joint_step_rad / largest_step;
-		}
-
-		Eigen::VectorXd dq = Eigen::VectorXd::Zero(arm.model.nv);
-		for (std::size_t index = 0; index < kIkJointCount; ++index) {
-			dq[arm.model.joints[arm.ik_joints[index]].idx_v()] = dq_arm[index];
-		}
-
-		// integrate обновляет конфигурацию Pinocchio. После каждой итерации
-		// ограничиваем суставы диапазонами из URDF.
-		result.q = pinocchio::integrate(arm.model, result.q, dq);
-		for (std::size_t index = 0; index < kIkJointCount; ++index) {
-			const auto joint = arm.model.joints[arm.ik_joints[index]];
-			result.q[joint.idx_q()] =
-			    std::clamp(result.q[joint.idx_q()],
-			               arm.model.lowerPositionLimit[joint.idx_q()],
-			               arm.model.upperPositionLimit[joint.idx_q()]);
-		}
-		++result.iterations;
-
-		pinocchio::forwardKinematics(arm.model, arm.data, result.q);
-		pinocchio::updateFramePlacements(arm.model, arm.data);
-		result.final_error_m = current_error();
-		result.converged = result.final_error_m <= params.position_tolerance_m;
-	}
-
-	return result;
+Eigen::Vector3d tool_axis(const ArmModel& arm) {
+	const Eigen::Matrix3d frame_rotation = arm.data.oMf[arm.frame_id].rotation();
+	// Третий столбец поворота — это ось фрейма в мире. Берём элементы по
+	// одному, а не произведением матрицы на вектор: gcc 13 ругается на
+	// ленивое вычисление произведения Eigen (ложное предупреждение
+	// -Wmaybe-uninitialized), а сборка с -Werror такую руготу не прощает.
+	return Eigen::Vector3d(frame_rotation(0, 2), frame_rotation(1, 2),
+	                       frame_rotation(2, 2));
 }
 
 }  // namespace so101

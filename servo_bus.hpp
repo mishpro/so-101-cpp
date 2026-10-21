@@ -168,6 +168,22 @@ read_all_servo_limits(SerialPort& port);
                                                      uint8_t servo_id,
                                                      const ServoLimits& limits);
 
+// Расслабляет мотор: удержание момента выключается, сустав двигается рукой.
+//
+// Нужно для ручной установки карандаша: с включённым удержанием мотор
+// держит позицию с моментом около 11 кг·см, а вес руки даёт на плече
+// примерно 2 кг·см — сдвинуть руку руками нельзя, сервоприводы победят.
+// Обратная операция — enable_servo_torque.
 bool disable_servo_torque(SerialPort& port, uint8_t servo_id);
+
+// Включает удержание момента на моторе. После ручной установки карандаша
+// программа обязана вернуть моторы в работу: оставленная расслабленной рука
+// провисает под тяжестью.
+bool enable_servo_torque(SerialPort& port, uint8_t servo_id);
+
+// Отправляет абсолютное положение мотора. announce печатает команду в
+// stdout: при плотном цикле (рисование круга) это лишний шум, и вызывающий
+// печатает своё.
 bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
-					   uint16_t speed, const ServoLimits& limits);
+					   uint16_t speed, const ServoLimits& limits,
+					   bool announce = true);

@@ -84,11 +84,48 @@ add_executable(cartesian_control cartesian_control.cpp)
 target_link_libraries(cartesian_control PRIVATE arm_model)
 so101_configure_target(cartesian_control)
 
+# Контракт руки для логики рисования: читать положения и отправлять цели.
+# Железа не знает — от него зависит только интерфейс.
+add_library(arm_feedback INTERFACE)
+target_include_directories(arm_feedback INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(arm_feedback INTERFACE servo_bus)
+
+# Что и где рисуем: плоскость и окружность. Без железа — значит, проверяется
+# в тестах без робота.
+add_library(drawing drawing.cpp)
+target_include_directories(drawing PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(drawing PUBLIC arm_model nlohmann_json::nlohmann_json)
+so101_configure_target(drawing)
+
+# Как рисуем: захват плоскости и обход траектории.
+add_library(drawing_execution drawing_execution.cpp)
+target_include_directories(drawing_execution PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(drawing_execution PUBLIC arm_model drawing arm_feedback)
+so101_configure_target(drawing_execution)
+
+# Единственное место, где логика рисования встречается с шиной.
+add_library(serial_arm serial_arm.cpp)
+target_include_directories(serial_arm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(serial_arm PUBLIC arm_feedback control_config)
+so101_configure_target(serial_arm)
+
+add_executable(draw_circle draw_circle.cpp)
+target_link_libraries(draw_circle PRIVATE drawing_execution serial_arm
+                                       control_config)
+so101_configure_target(draw_circle)
+
 # Копия конфига обновляется при каждой сборке, а не только при конфигурации:
 # иначе правка send_config.json не попадала бы в build/ до перезапуска cmake.
 # Калибровки моторов здесь нет: она живёт в регистрах сервоприводов, а её
 # перенос в URDF делает tools/sync_urdf_limits.py, читая те же регистры.
 add_custom_command(TARGET cartesian_control POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/send_config.json
+            ${CMAKE_CURRENT_BINARY_DIR}/send_config.json
+    COMMENT "Refreshing config in the build directory")
+
+# То же для программы рисования: она читает тот же конфиг.
+add_custom_command(TARGET draw_circle POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/send_config.json
             ${CMAKE_CURRENT_BINARY_DIR}/send_config.json

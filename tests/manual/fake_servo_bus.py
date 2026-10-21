@@ -35,6 +35,10 @@ REG_GOAL_VELOCITY = 0x2E
 REG_PRESENT_POSITION = 0x38
 REG_TORQUE_ENABLE = 0x28
 
+# Байт команды в пакете: 0x02 — чтение, 0x03 — запись.
+INST_READ = 0x02
+INST_WRITE = 0x03
+
 
 def checksum(packet: bytes, first: int, last: int) -> int:
     return (~sum(packet[first:last + 1])) & 0xFF
@@ -43,7 +47,8 @@ def checksum(packet: bytes, first: int, last: int) -> int:
 class FakeServoBus:
     """Обслуживает шесть моторов на slave-конце псевдо-порта."""
 
-    def __init__(self, min_positions, max_positions, present_positions=None):
+    def __init__(self, min_positions, max_positions, present_positions=None,
+                 follow_goal=False):
         if not (len(min_positions) == len(max_positions) == 6):
             raise ValueError("ожидаются ровно шесть моторов")
         self.min_positions = [int(value) for value in min_positions]
@@ -55,6 +60,11 @@ class FakeServoBus:
             ]
         self.present_positions = [int(value) for value in present_positions]
         self.goal_positions = list(self.present_positions)
+        # follow_goal: мотор мгновенно приходит к заданной цели. Обычно
+        # этого не бывает — эмулятор стоит на месте, — но программам, которые
+        # ждут фактического достижения точки (рисование круга), без этого
+        # ждать бессмысленно: они упрутся в таймаут.
+        self.follow_goal = follow_goal
         self.writes: list[tuple[int, int, int]] = []
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -125,14 +135,27 @@ class FakeServoBus:
                     return
 
     def _handle(self, data: bytes) -> bytes | None:
-        for offset in range(len(data) - 7):
+        # В одном чтении может оказаться несколько пакетов: команды четырём
+        # моторам подряд уходят в порт без пауз между ними. Раньше эмулятор
+        # обрабатывал только первый пакет и выбрасывал остальные — поток
+        # рассыпался, и следующий запрос читался по сдвигу.
+        replies = b""
+        offset = 0
+        while offset < len(data) - 7:
             packet = self._frame(data, offset)
             if packet is None:
+                offset += 1
                 continue
-            if len(packet) == 8:
-                return self._handle_read(packet)
-            return self._handle_write(packet)
-        return None
+            # Читание или запись определяется байтом команды, а не длиной
+            # пакета: запись одного байта (переключатель момента) — тоже
+            # восемь байт, как и чтение. По длине эмулятор считал такую
+            # запись чтением, отвечал на неё, и поток рассыпался.
+            if packet[4] == INST_READ:
+                replies += self._handle_read(packet)
+            else:
+                self._handle_write(packet)
+            offset += len(packet)
+        return replies or None
 
     @staticmethod
     def _frame(data: bytes, offset: int) -> bytes | None:
@@ -168,6 +191,8 @@ class FakeServoBus:
         self.writes.append((servo_id, address, value))
         if 0 <= servo_id - 1 < 6 and address == REG_GOAL_POSITION:
             self.goal_positions[servo_id - 1] = value
+            if self.follow_goal:
+                self.present_positions[servo_id - 1] = value
         return None
 
     def _register(self, index: int, address: int) -> int:
