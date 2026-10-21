@@ -1,6 +1,10 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <stdexcept>
 #include <string>
 
 // Feetech STS3215 считает угол как steps * 360 / 4095 — именно так, а не через
@@ -28,11 +32,29 @@ inline constexpr unsigned kServoBusBaud = 1000000;
 inline constexpr int kReopenAttempts = 25;
 inline constexpr int kReopenDelayMicroseconds = 200000;
 
+// SO-101: шесть сервоприводов с номерами 1..6. Живёт здесь, а не в arm_model:
+// это свойство шины, и транспортному слою оно нужно не меньше, чем модели.
+inline constexpr std::size_t kServoCount = 6;
+
+// Адреса регистров STS3215.
+//
+// enum class, а не набор констант: адрес не должен молча сложиться с целым
+// числом, а в протокол попадает как есть, поэтому единственное место, где тип
+// превращается обратно в байт, — граница обмена с железом.
+enum class Register : uint8_t {
+	min_position_limit = 0x09,
+	max_position_limit = 0x0B,
+	torque_enable = 0x28,
+	goal_position = 0x2A,
+	goal_velocity = 0x2E,
+	present_position = 0x38,
+};
+
 // Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
 // при которых мотор считает себя нулём градусов и концом хода.
 struct ServoLimits {
-	uint16_t min_position;
-	uint16_t max_position;
+	uint16_t min_position{0};
+	uint16_t max_position{0};
 
 	// Полный ход мотора в градусах. Считается в double: эта величина
 	// сравнивается с диапазонами URDF, где нужна точность выше, чем даёт float.
@@ -56,8 +78,19 @@ struct ServoLimits {
 	}
 };
 
+// Сбой связи с шиной сервоприводов. Отдельный тип, а не std::runtime_error:
+// вызывающий код отличает «порт не открылся» от прочих ошибок и может
+// показать пользователю осмысленное сообщение.
+class ServoPortError : public std::runtime_error {
+public:
+	// Уналедованный конструктор std::runtime_error не был бы explicit, и
+	// ошибка молча превратилась бы в любой строковый литерал.
+	explicit ServoPortError(const std::string& what)
+	    : std::runtime_error(what) {}
+};
+
 // Владеет файловым дескриптором tty-порта и закрывает его в деструкторе.
-// Конструктор бросает std::runtime_error, если порт не открылся.
+// Конструктор бросает ServoPortError, если порт не открылся.
 //
 // Объект умеет переоткрывать порт: адаптер иногда теряет связь с хабом
 // («disabled by hub (EMI?)» в dmesg), после чего устройство переподключается
@@ -74,8 +107,8 @@ public:
 	SerialPort(SerialPort&& other) noexcept;
 	SerialPort& operator=(SerialPort&& other) noexcept;
 
-	int fd() const noexcept { return fd_; }
-	const std::string& path() const noexcept { return port_; }
+	[[nodiscard]] int fd() const noexcept { return fd_; }
+	[[nodiscard]] const std::string& path() const noexcept { return port_; }
 
 	// Переоткрывает порт после обрыва USB. Ждёт переподключения: узел
 	// /dev/ttyACM* появляется не мгновенно. Возвращает false, если устройство
@@ -84,24 +117,28 @@ public:
 
 private:
 	std::string port_;
-	int fd_;
+	int fd_{-1};
 };
 
 int configure_serial_port(const char* port);
 
-// Границы протокола сервопривода: абсолютные отсчёты регистров 0x09 и 0x0B,
-// при которых мотор считает себя нулём градусов и концом хода.
-
-// Читает границы одного мотора прямо из его регистров.
-bool read_servo_limits(SerialPort& port, uint8_t servo_id, ServoLimits& limits);
+// Читает границы одного мотора прямо из его регистров. Пустой optional —
+// мотор не ответил.
+[[nodiscard]] std::optional<ServoLimits> read_servo_limits(SerialPort& port,
+                                                           uint8_t servo_id);
 
 // Читает границы всех шести моторов прямо из регистров. Это единственный
 // источник границ протокола: в URDF те же значения переносятся генератором
 // tools/sync_urdf_limits.py, который читает регистры напрямую.
-bool read_all_servo_limits(SerialPort& port, ServoLimits limits[6]);
+[[nodiscard]] std::optional<std::array<ServoLimits, kServoCount>>
+read_all_servo_limits(SerialPort& port);
 
-bool read_joint_angle(SerialPort& port, uint8_t servo_id,
-					  const ServoLimits& limits, float& angle_degrees);
+// Текущий угол мотора в градусах от откалиброванного нуля. Пустой optional —
+// мотор не ответил либо стоит вне своих границ.
+[[nodiscard]] std::optional<float> read_joint_angle(SerialPort& port,
+                                                     uint8_t servo_id,
+                                                     const ServoLimits& limits);
+
 bool disable_servo_torque(SerialPort& port, uint8_t servo_id);
 bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
 					   uint16_t speed, const ServoLimits& limits);

@@ -14,16 +14,13 @@ namespace {
 
 // Servo id -> имя сустава в URDF. Соответствие совпадает с блоками
 // <transmission> в so101_irs_ksant.urdf (<actuator name="motorN">).
-constexpr const char* kServoJointNames[kServoCount] = {
+constexpr std::array<const char*, kServoCount> kServoJointNames{
     "shoulder_pan", "shoulder_lift", "elbow_flex",
     "wrist_flex",   "wrist_roll",    "gripper",
 };
 
 // Feetech STS3215: угол мотора считается как steps · 360 / 4095. Константа
 // берётся из servo_bus.hpp — иначе URDF разойдётся с прошивкой.
-
-// M_PI не входит в стандарт C++17, поэтому константа своя.
-constexpr double kPi = 3.14159265358979323846;
 
 int checked_index(int servo_id) {
 	return (servo_id < 1 || servo_id > static_cast<int>(kServoCount))
@@ -48,18 +45,19 @@ double ArmModel::upper_position_limit(int servo_id) const {
 }
 
 double ArmModel::servo_span_rad(const ServoLimits& limits) const {
-	return static_cast<double>(limits.span_degrees()) * kPi / 180.0;
+	return degrees_to_radians(limits.span_degrees());
 }
 
 // С диапазонами URDF, совпадающими с диапазонами моторов (это гарантирует
-// check_joint_limits), один градус мотора равен одному радиану URDF: минимум
-// мотора попадает в lower, максимум — в upper, без пересчёта.
+// check_joint_limits), градус мотора и градус URDF совпадают: минимум мотора
+// попадает в lower, максимум — в upper, и пересчёт — это только перевод
+// градусов в радианы, без масштабирования.
 double ArmModel::servo_degrees_to_q(int servo_id, double degrees) const {
 	const int index = checked_index(servo_id);
 	if (index < 0) return 0.0;
 
 	const auto& joint = model.joints[servo_joints[index]];
-	return model.lowerPositionLimit[joint.idx_q()] + degrees * kPi / 180.0;
+	return model.lowerPositionLimit[joint.idx_q()] + degrees_to_radians(degrees);
 }
 
 double ArmModel::q_to_servo_degrees(int servo_id, double q) const {
@@ -72,7 +70,7 @@ double ArmModel::q_to_servo_degrees(int servo_id, double q) const {
 	if (upper <= lower) return 0.0;
 
 	const double fraction = std::clamp((q - lower) / (upper - lower), 0.0, 1.0);
-	return fraction * (upper - lower) * 180.0 / kPi;
+	return radians_to_degrees(fraction * (upper - lower));
 }
 
 bool load_arm_model(const std::string& urdf_path, const std::string& frame_name,
@@ -111,7 +109,8 @@ bool load_arm_model(const std::string& urdf_path, const std::string& frame_name,
 	return true;
 }
 
-bool check_joint_limits(const ArmModel& arm, const ServoLimits limits[kServoCount],
+bool check_joint_limits(const ArmModel& arm,
+                        const std::array<ServoLimits, kServoCount>& limits,
                         double tolerance_rad, std::string& error) {
 	error.clear();
 	for (std::size_t servo_id = 0; servo_id < kServoCount; ++servo_id) {
@@ -134,8 +133,8 @@ bool check_joint_limits(const ArmModel& arm, const ServoLimits limits[kServoCoun
 		message << std::fixed << std::setprecision(2) << "joint "
 		        << static_cast<int>(servo_id + 1) << " ("
 		        << kServoJointNames[servo_id] << "): servo registers give "
-		        << servo_span * 180.0 / kPi << " deg, URDF says "
-		        << urdf_span * 180.0 / kPi << " deg";
+		        << radians_to_degrees(servo_span) << " deg, URDF says "
+		        << radians_to_degrees(urdf_span) << " deg";
 		if (!error.empty()) error += "; ";
 		error += message.str();
 	}
@@ -157,7 +156,11 @@ IkResult solve_ik(ArmModel& arm, const Eigen::Vector3d& target,
 	result.final_error_m = result.initial_error_m;
 	result.converged = result.final_error_m <= params.position_tolerance_m;
 
-	pinocchio::Data::Matrix6x jacobian(6, arm.model.nv);
+	// Якобиан фрейма: шесть строк (xyz) и по одному столбцу на степень
+	// свободы. Data::Matrix6x здесь не годится: у неё фиксированные шесть
+	// столбцов, и при nv != 6 getFrameJacobian писал бы за её пределы —
+	// в релизной сборке без проверок Eigen это тихая порча памяти.
+	Eigen::Matrix<double, 6, Eigen::Dynamic> jacobian(6, arm.model.nv);
 
 	// Несколько итераций Damped Least Squares позволяют приблизить конечную
 	// точку к цели точнее, чем один шаг за вызов.

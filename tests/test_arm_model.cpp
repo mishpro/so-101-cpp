@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -22,7 +23,6 @@ namespace {
 using so101::kIkJointCount;
 using so101::kServoCount;
 
-constexpr double kPi = 3.14159265358979323846;
 
 std::string test_urdf_path() {
     ControlConfig config{};
@@ -55,7 +55,7 @@ std::array<ServoLimits, kServoCount> reference_limits(const so101::ArmModel& arm
         const long steps = std::lround(span * kStepsPerRadian);
         // Диапазон URDF обязан укладываться в 16-битные отсчёты мотора: иначе
         // перевод градусов в позицию терял бы точность или переполнялся.
-        CHECK(steps > 0 && steps <= 65535);
+        CHECK(steps > 0 && steps <= std::numeric_limits<uint16_t>::max());
         limits[index] = {0, static_cast<uint16_t>(steps)};
     }
     return limits;
@@ -73,7 +73,7 @@ void test_ik_joint_set(const so101::ArmModel& arm) {
 void test_limits_match_calibration(const so101::ArmModel& arm) {
     const auto limits = reference_limits(arm);
     std::string error;
-    CHECK_MSG(so101::check_joint_limits(arm, limits.data(), 0.5 * kPi / 180.0,
+    CHECK_MSG(so101::check_joint_limits(arm, limits, so101::kJointLimitToleranceRad,
                                         error),
               error);
 
@@ -81,7 +81,7 @@ void test_limits_match_calibration(const so101::ArmModel& arm) {
         const int servo_id = static_cast<int>(index) + 1;
         const double span = arm.upper_position_limit(servo_id) -
                             arm.lower_position_limit(servo_id);
-        CHECK_NEAR(span, arm.servo_span_rad(limits[index]), 0.5 * kPi / 180.0);
+        CHECK_NEAR(span, arm.servo_span_rad(limits[index]), so101::kJointLimitToleranceRad);
     }
 }
 
@@ -89,7 +89,7 @@ void test_limits_check_detects_drift(const so101::ArmModel& model) {
     std::string error;
     auto limits = reference_limits(model);
     limits[4].max_position = static_cast<uint16_t>(limits[4].max_position - 300);
-    CHECK(!so101::check_joint_limits(model, limits.data(), 0.5 * kPi / 180.0,
+    CHECK(!so101::check_joint_limits(model, limits, so101::kJointLimitToleranceRad,
                                      error));
     // В сообщении должно быть имя именно сломанного сустава.
     CHECK(error.find("wrist_roll") != std::string::npos);
@@ -102,20 +102,20 @@ void test_limits_check_detects_drift(const so101::ArmModel& model) {
         static_cast<uint16_t>(two_drifted[4].max_position - 300);
     two_drifted[2].min_position =
         static_cast<uint16_t>(two_drifted[2].min_position + 200);
-    CHECK(!so101::check_joint_limits(model, two_drifted.data(),
-                                     0.5 * kPi / 180.0, error));
+    CHECK(!so101::check_joint_limits(model, two_drifted,
+                                     so101::kJointLimitToleranceRad, error));
     CHECK(error.find("wrist_roll") != std::string::npos);
     CHECK(error.find("elbow_flex") != std::string::npos);
 
     // Сообщение об ошибке пустее, когда всё сошлось.
-    CHECK(so101::check_joint_limits(model, reference_limits(model).data(),
-                                    0.5 * kPi / 180.0, error));
+    CHECK(so101::check_joint_limits(model, reference_limits(model),
+                                    so101::kJointLimitToleranceRad, error));
     CHECK(error.empty());
 
     // Пустой диапазон мотора тоже должен ловиться.
     auto empty = reference_limits(model);
     empty[0].max_position = empty[0].min_position;
-    CHECK(!so101::check_joint_limits(model, empty.data(), 0.5 * kPi / 180.0,
+    CHECK(!so101::check_joint_limits(model, empty, so101::kJointLimitToleranceRad,
                                      error));
     CHECK(error.find("empty") != std::string::npos);
 }
@@ -127,7 +127,7 @@ void test_servo_span_matches_degrees(const so101::ArmModel& arm) {
     for (std::size_t index = 0; index < kServoCount; ++index) {
         const double steps = static_cast<double>(limits[index].max_position -
                                                  limits[index].min_position);
-        CHECK_NEAR(limits[index].span_degrees(), steps * 360.0 / 4095.0, 1e-9);
+        CHECK_NEAR(limits[index].span_degrees(), steps * kDegreesPerStep, 1e-9);
         // Обратное преобразование должно возвращать исходный отсчёт.
         CHECK_NEAR(limits[index].degrees_to_position(
                        limits[index].span_degrees()),
@@ -142,7 +142,7 @@ void test_angle_roundtrip(const so101::ArmModel& arm) {
     const auto limits = reference_limits(arm);
     for (std::size_t index = 0; index < so101::kServoCount; ++index) {
         const int servo_id = static_cast<int>(index) + 1;
-        const double span_deg = arm.servo_span_rad(limits[index]) * 180.0 / kPi;
+        const double span_deg = so101::radians_to_degrees(arm.servo_span_rad(limits[index]));
 
         // Границы диапазона мотора должны попадать ровно в границы URDF.
         CHECK_NEAR(arm.servo_degrees_to_q(servo_id, 0.0),
@@ -161,7 +161,7 @@ void test_angle_roundtrip(const so101::ArmModel& arm) {
 void test_q_to_degrees_clamps(const so101::ArmModel& arm) {
     const auto limits = reference_limits(arm);
     const int servo_id = 1;
-    const double span_deg = arm.servo_span_rad(limits[0]) * 180.0 / kPi;
+    const double span_deg = so101::radians_to_degrees(arm.servo_span_rad(limits[0]));
 
     // Значение за пределами диапазона должно обрезаться, а не уйти на серво.
     CHECK_NEAR(arm.q_to_servo_degrees(
@@ -218,12 +218,12 @@ void test_ik_tracks_cartesian_steps(const so101::ArmModel& model_template) {
             const Eigen::Vector3d target = origin + direction;
             const so101::IkResult result =
                 so101::solve_ik(arm, target, start, params);
-            char detail[128];
-            std::snprintf(detail, sizeof(detail),
+            std::array<char, 128> detail{};
+            std::snprintf(detail.data(), detail.size(),
                           "target [%.3f %.3f %.3f] residual %.4f in %d iterations",
                           target.x(), target.y(), target.z(),
                           result.final_error_m, result.iterations);
-            CHECK_MSG(result.converged, detail);
+            CHECK_MSG(result.converged, detail.data());
         }
     }
 }
@@ -267,11 +267,11 @@ void test_ik_never_makes_things_worse(const so101::ArmModel& model_template) {
         worst_ratio = std::max(worst_ratio, ratio);
     }
 
-    char detail[128];
-    std::snprintf(detail, sizeof(detail),
+    std::array<char, 128> detail{};
+    std::snprintf(detail.data(), detail.size(),
                   "из %d целей ухудшились %d, худшее отношение %.2f", total,
                   worsened, worst_ratio);
-    CHECK_MSG(worsened == 0, detail);
+    CHECK_MSG(worsened == 0, detail.data());
 }
 
 // Регрессия: pinocchio 4.1.0 computeFrameJacobian возвращает якобиан, не

@@ -69,7 +69,31 @@ json with_field(const char* key, const json& value) {
 
 }  // namespace
 
+// Скорость сустава ограничивается диапазоном мотора.
+//
+// Делитель берётся из конфига и может быть меньше единицы: тогда для дальних
+// суставов скорость уходит за пределы регистра, а приведение double к
+// uint16_t вне диапазона — неопределённое поведение.
+void test_joint_speed_is_clamped() {
+    // Обычный случай: суставы идут медленнее первого.
+    CHECK(joint_speed(600, 1.2, 0) == 600);
+    CHECK(joint_speed(600, 1.2, 1) == 500);
+    // 600 / 1.2^2 = 416.67, округление даёт 417.
+    CHECK(joint_speed(600, 1.2, 2) == 417);
+
+    // Делитель меньше единицы: скорость растёт, но не выходит за пределы
+    // регистра и не оборачивается в ноль.
+    const uint16_t fast = joint_speed(600, 0.1, 5);
+    CHECK(fast >= kMinMotorSpeed);
+    CHECK(fast <= kMaxMotorSpeed);
+
+    // Совсем большой делитель: скорость не должна упасть ниже минимума.
+    CHECK(joint_speed(600, 100.0, 3) == kMinMotorSpeed);
+}
+
 int main() {
+    test_joint_speed_is_clamped();
+
     // Корректный конфиг должен приниматься и разворачивать ~.
     {
         const std::string path = write_temporary(valid_config_object());

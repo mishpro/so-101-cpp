@@ -1,8 +1,11 @@
 #include "control_config.hpp"
 #include "servo_bus.hpp"
 
+#include <array>
+#include <cstddef>
 #include <exception>
 #include <iostream>
+#include <optional>
 #include <string>
 
 namespace {
@@ -18,12 +21,12 @@ int main(int argc, char** argv) {
     try {
         ControlConfig config{};
         if (!load_config(kConfigPath, config)) {
-            std::cerr << "Failed to load valid " << kConfigPath << std::endl;
+            std::cerr << "Failed to load valid " << kConfigPath << '\n';
             return 1;
         }
         port = config.port;
     } catch (const std::exception& exception) {
-        std::cerr << exception.what() << std::endl;
+        std::cerr << exception.what() << '\n';
         return 1;
     }
 
@@ -36,30 +39,31 @@ int main(int argc, char** argv) {
 
         // Границы берём из регистров моторов, а не из файла: base_angle
         // ничего не откалибровывает, он просто читает текущие положения.
-        ServoLimits limits[6]{};
-        if (!read_all_servo_limits(serial_port, limits)) {
+        const std::optional<std::array<ServoLimits, kServoCount>> limits =
+            read_all_servo_limits(serial_port);
+        if (!limits) {
             return 1;
         }
 
-        std::cout << "Querying SO-101 Joint Angles..." << std::endl;
+        std::cout << "Querying SO-101 Joint Angles...\n";
 
         // SO-101 has six daisy-chained Feetech servos with IDs 1 through 6.
-        for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
-            float angle = 0.0f;
-            if (read_joint_angle(serial_port, servo_id,
-                                 limits[servo_id - 1], angle)) {
+        for (std::size_t index = 0; index < kServoCount; ++index) {
+            const uint8_t servo_id = static_cast<uint8_t>(index + 1);
+            const std::optional<float> angle =
+                read_joint_angle(serial_port, servo_id, (*limits)[index]);
+            if (angle) {
                 std::cout << "Joint " << static_cast<int>(servo_id)
-                          << " angle: " << angle << " degrees" << std::endl;
+                          << " angle: " << *angle << " degrees\n";
             } else {
                 std::cerr << "Joint " << static_cast<int>(servo_id)
-                          << " angle read failed" << std::endl;
+                          << " angle read failed\n";
             }
         }
     } catch (const std::exception& exception) {
-        std::cerr << exception.what() << std::endl;
+        std::cerr << exception.what() << '\n';
         return 1;
     }
 
     return 0;
 }
-

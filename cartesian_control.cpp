@@ -39,10 +39,14 @@ public:
 
     TerminalInput(const TerminalInput&) = delete;
     TerminalInput& operator=(const TerminalInput&) = delete;
+    // Пользовательский деструктор подавляет неявное перемещение, но
+    // отсутствие move-операций стоит объявить явно.
+    TerminalInput(TerminalInput&&) = delete;
+    TerminalInput& operator=(TerminalInput&&) = delete;
 
     // Возвращает 0 при EOF или ошибке чтения — оба случая означают, что
     // управлять дальше нечем.
-    char getch() {
+    char getch() const {
         char key = 0;
         return read(STDIN_FILENO, &key, 1) > 0 ? key : 0;
     }
@@ -60,16 +64,16 @@ bool read_servo_configuration(SerialPort& port,
                               std::array<float, kServoCount>& degrees) {
     for (std::size_t index = 0; index < kServoCount; ++index) {
         const int servo_id = static_cast<int>(index) + 1;
-        float angle_degrees = 0.0f;
-        if (!read_joint_angle(port, static_cast<uint8_t>(servo_id),
-                              limits[index], angle_degrees)) {
+        const std::optional<float> angle_degrees =
+            read_joint_angle(port, static_cast<uint8_t>(servo_id), limits[index]);
+        if (!angle_degrees) {
             return false;
         }
-        degrees[index] = angle_degrees;
+        degrees[index] = *angle_degrees;
 
         const auto joint = arm.model.joints[arm.servo_joints[index]];
-        q[joint.idx_q()] =
-            arm.servo_degrees_to_q(servo_id, static_cast<double>(angle_degrees));
+        q[joint.idx_q()] = arm.servo_degrees_to_q(
+            servo_id, static_cast<double>(*angle_degrees));
     }
     return true;
 }
@@ -95,14 +99,13 @@ bool send_configuration(SerialPort& port,
                         const std::array<float, kServoCount>& angles) {
     bool succeeded = true;
     for (std::size_t index = 0; index < angles.size(); ++index) {
-        const uint16_t joint_speed = std::max<uint16_t>(
-            1, static_cast<uint16_t>(config.speed /
-                                     std::pow(config.joint_speed_divisor,
-                                              static_cast<int>(index))));
+        const uint16_t motor_speed =
+            joint_speed(config.speed, config.joint_speed_divisor,
+                        static_cast<int>(index));
         // write_joint_angle самостоятельно переводит градусы в отсчёты,
         // добавляет минимальное положение и отправляет пакет через ttyACM.
         succeeded = write_joint_angle(port, static_cast<uint8_t>(index + 1),
-                                      angles[index], joint_speed,
+                                      angles[index], motor_speed,
                                       limits[index]) &&
                     succeeded;
     }
@@ -155,7 +158,8 @@ void control_cartesian(SerialPort& port,
     std::cout << "\n(wrist_roll и gripper вне IK, управляются через send -j5/-j6)"
               << "\n[T/G] X forward/back, [A/D] Y left/right, [W/S] Z up/down\n"
               << "[Q] quit, step: " << config.cartesian_step_m << " m\n"
-              << "Target: " << target.transpose() << std::endl;
+              << "Target: " << target.transpose() << '\n'
+           << std::flush;
 
     TerminalInput terminal;
     while (true) {
@@ -189,7 +193,7 @@ void control_cartesian(SerialPort& port,
                       << ik.iterations << " iterations, residual "
                       << ik.final_error_m
                       << " m; the arm is most likely at a joint limit."
-                      << std::endl;
+                      << '\n';
         }
 
         const auto target_angles =
@@ -209,7 +213,8 @@ void control_cartesian(SerialPort& port,
         print_angles("Target angles", target_angles);
         std::cout << "Target XYZ [m]: [" << target.transpose() << "]\n"
                   << "IK error before [m]: " << ik.initial_error_m << "\n"
-                  << "IK error after  [m]: " << ik_error.norm() << std::endl;
+                  << "IK error after  [m]: " << ik_error.norm() << '\n'
+               << std::flush;
     }
 }
 }  // namespace
@@ -218,7 +223,7 @@ int main() {
     try {
         ControlConfig config{};
         if (!load_config("send_config.json", config)) {
-            std::cerr << "Failed to load valid send_config.json" << std::endl;
+            std::cerr << "Failed to load valid send_config.json" << '\n';
             return 1;
         }
 
@@ -226,7 +231,7 @@ int main() {
         std::string error;
         if (!so101::load_arm_model(config.urdf_path, config.end_effector, arm,
                                    error)) {
-            std::cerr << error << std::endl;
+            std::cerr << error << '\n';
             return 1;
         }
 
@@ -235,43 +240,45 @@ int main() {
         // Границы протокола берём из регистров самих сервоприводов: файл
         // калибровки в проекте нет, а диапазон мотора хранится в нём самом.
         // В URDF те же значения переносит tools/sync_urdf_limits.py.
-        std::array<ServoLimits, kServoCount> limits{};
-        if (!read_all_servo_limits(port, limits.data())) {
-            std::cerr << "Failed to read joint limits from the servos"
-                      << std::endl;
+        const std::optional<std::array<ServoLimits, kServoCount>> read_limits =
+            read_all_servo_limits(port);
+        if (!read_limits) {
+            std::cerr << "Failed to read joint limits from the servos\n";
             return 1;
         }
+        const std::array<ServoLimits, kServoCount>& limits = *read_limits;
 
         std::ostringstream registers;
         registers << std::fixed << std::setprecision(2)
                   << "servo registers [deg]: ";
         for (std::size_t index = 0; index < kServoCount; ++index) {
-            registers << limits[index].span_degrees() << (index + 1 < kServoCount ? " / " : "");
+            registers << limits[index].span_degrees()
+                      << (index + 1 < kServoCount ? " / " : "");
         }
-        std::cout << registers.str() << std::endl;
+        std::cout << registers.str() << '\n';
 
         // URDF — источник истины для углов. Расхождение с регистрами означает,
         // что моторы перенастроены относительно модели: работаем дальше, но
         // говорим об этом.
-        if (!so101::check_joint_limits(arm, limits.data(),
+        if (!so101::check_joint_limits(arm, limits,
                                        so101::kJointLimitToleranceRad, error)) {
             std::cerr << "\nWarning: servo registers disagree with the URDF: "
                       << error
                       << "\n         angles are taken from the URDF; if the arm "
                          "behaves unexpectedly, re-run "
                          "tools/sync_urdf_limits.py"
-                      << std::endl;
+                      << '\n';
         }
 
         try {
             control_cartesian(port, limits, config, arm);
         } catch (const std::exception& exception) {
             std::cerr << "\nCartesian control stopped: " << exception.what()
-                      << std::endl;
+                      << '\n';
             return 1;
         }
     } catch (const std::exception& exception) {
-        std::cerr << exception.what() << std::endl;
+        std::cerr << exception.what() << '\n';
         return 1;
     }
     return 0;

@@ -7,14 +7,17 @@
 #include <pinocchio/multibody.hpp>
 
 #include <array>
+#include <cstddef>
 #include <string>
 
 #include "servo_bus.hpp"
 
 namespace so101 {
 
-// SO-101: шесть сервоприводов с номерами 1..6.
-inline constexpr std::size_t kServoCount = 6;
+// Число сервоприводов определено в servo_bus.hpp: это свойство шины, и
+// транспортному слою оно нужно не меньше, чем модели. Здесь имя доступно и
+// в пространстве so101, чтобы код модели не зависел от того, где объявлено.
+using ::kServoCount;
 
 // Суставы, по которым решается IK. wrist_roll и gripper исключены намеренно:
 //   - gripper — челюсть захвата, она находится ниже gripper_frame_link по
@@ -34,6 +37,18 @@ inline constexpr std::size_t kIkJointCount = 4;
 // сравнивал абсолютные отсчёты, вердикт — span. Теперь и подпись в таблице,
 // и итоговая строка считают одно и то же.
 inline constexpr double kJointLimitToleranceRad = 0.008726646259971648; // 0.5°
+
+// M_PI не входит в стандарт C++17, поэтому константа своя.
+inline constexpr double kPi = 3.14159265358979323846;
+
+// Градусы в радианы и обратно. Один пересчёт на весь проект: иначе
+// «180.0 / kPi» расползается по файлам и однажды разъедется с URDF.
+[[nodiscard]] constexpr double degrees_to_radians(double degrees) noexcept {
+	return degrees * kPi / 180.0;
+}
+[[nodiscard]] constexpr double radians_to_degrees(double radians) noexcept {
+	return radians * 180.0 / kPi;
+}
 
 struct ArmModel {
 	pinocchio::Model model;
@@ -68,9 +83,9 @@ struct ArmModel {
 // источник истины для углов, поэтому расхождение здесь не повод отказываться
 // работать, а повод предупредить. error заполняется всеми расхождениями
 // сразу, а не только первым.
-[[nodiscard]] bool check_joint_limits(const ArmModel& arm,
-                                      const ServoLimits limits[kServoCount],
-                                      double tolerance_rad, std::string& error);
+[[nodiscard]] bool check_joint_limits(
+    const ArmModel& arm, const std::array<ServoLimits, kServoCount>& limits,
+    double tolerance_rad, std::string& error);
 
 struct IkParams {
 	double damping{1e-4};
@@ -80,7 +95,7 @@ struct IkParams {
 };
 
 struct IkResult {
-	Eigen::VectorXd q;
+	Eigen::VectorXd q{Eigen::VectorXd::Zero(6)};
 	double initial_error_m{0.0};
 	double final_error_m{0.0};
 	bool converged{false};

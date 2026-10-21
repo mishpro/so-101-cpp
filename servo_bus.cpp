@@ -1,23 +1,58 @@
 #include "servo_bus.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <fcntl.h>
+#include <cstddef>
 #include <iostream>
 #include <stdexcept>
 #include <termios.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 constexpr uint8_t INST_READ = 0x02;
 constexpr uint8_t INST_WRITE = 0x03;
-constexpr uint8_t REG_MIN_POSITION_LIMIT = 0x09;
-constexpr uint8_t REG_MAX_POSITION_LIMIT = 0x0B;
-constexpr uint8_t REG_GOAL_POSITION = 0x2A;
-constexpr uint8_t REG_GOAL_VELOCITY = 0x2E;
-constexpr uint8_t REG_PRESENT_POSITION = 0x38;
-constexpr uint8_t REG_TORQUE_ENABLE = 0x28;
+
+// Раскладка кадра STS3215:
+//   [0..1]  заголовок 0xFF 0xFF
+//   [2]     номер сервопривода
+//   [3]     длина пакета
+//   [4]     инструкция в запросе, код ошибки в ответе
+//   [5..]   параметры: адрес регистра, либо значение
+//   [последний] контрольная сумма
+constexpr uint8_t kPacketHeader = 0xFF;
+// Байт длины внутри кадра и поле «читаю столько-то байт» в запросе.
+constexpr uint8_t kReadPacketLength = 0x04;
+constexpr uint8_t kWritePacketLength = 0x05;
+constexpr uint8_t kDataLength = 0x02;
+constexpr uint8_t kReserved = 0x00;
+constexpr std::size_t kServoIdIndex = 2;
+constexpr std::size_t kLengthIndex = 3;
+constexpr std::size_t kErrorCodeIndex = 4;
+constexpr std::size_t kDataLowIndex = 5;
+constexpr std::size_t kDataHighIndex = 6;
+
+// Длина кадра в байтах: у STS3215 запрос чтения и ответ занимают по 8 байт,
+// запись — 9.
+constexpr std::size_t kReadPacketSize = 8;
+constexpr std::size_t kWritePacketSize = 9;
+
+// Сколько раз пробуем прочитать ответ, прежде чем признать мотор молчащим.
+constexpr int kReadAttempts = 20;
+
+// Сколько раз повторяем запрос целиком, прежде чем сдаться.
+constexpr int kRegisterReadAttempts = 2;
+constexpr int kReadRetryDelayMicroseconds = 1000;
+
+// Пауза между моторами при чтении границ всех шести: даёт шине time settle.
+constexpr int kInterServoDelayMicroseconds = 1000;
+
+// Пауза между записью скорости и записью целевой позиции: мотор должен успеть
+// принять скорость до следующей команды.
+constexpr int kVelocityToPositionDelayMicroseconds = 3000;
 
 uint8_t checksum(const uint8_t* packet, int first, int last) {
     uint32_t sum = 0;
@@ -25,6 +60,12 @@ uint8_t checksum(const uint8_t* packet, int first, int last) {
         sum += packet[index];
     }
     return static_cast<uint8_t>(~sum);
+}
+
+// Контрольная сумма кадра: ~(сумма байт [2 .. total-2]), последним байтом
+// кадра. Два байта заголовка и сама сумма в покрытие не входят.
+void finish_checksum(uint8_t* packet, int total) {
+    packet[total - 1] = checksum(packet, 2, total - 2);
 }
 
 bool write_packet(int fd, const uint8_t* packet, size_t packet_size) {
@@ -47,9 +88,9 @@ bool write_packet(int fd, const uint8_t* packet, size_t packet_size) {
 // Итог одной попытки чтения регистра. Различать важно: «мотор не ответил» и
 // «USB-устройство отвалилось» требуют разных действий, а сообщение об ошибке
 // обязано их различать, иначе обрыв кабеля выглядит как поломка робота.
-enum class ReadResult { Ok, NoAnswer, Disconnected };
+enum class ReadResult { Ok, NoAnswer, Disconnected, ServoError };
 
-bool is_disconnect_error(int error) {
+constexpr bool is_disconnect_error(int error) {
     // EIO и ENODEV — устройство исчезло с шины; ENXIO встречается на
     // отключённом устройстве, EPIPE — на оборванном конце. После
     // переподключения read() на живом tty возвращает именно их.
@@ -57,27 +98,28 @@ bool is_disconnect_error(int error) {
            error == EPIPE;
 }
 
-ReadResult read_register_once(int fd, uint8_t servo_id, uint8_t address,
-                               uint16_t& value) {
+ReadResult read_register_once(int fd, uint8_t servo_id, Register address,
+                              uint16_t& value) {
     tcflush(fd, TCIOFLUSH);
 
-    uint8_t request[8] = {
-        0xFF, 0xFF, servo_id, 0x04, INST_READ, address, 0x02, 0x00
+    std::array<uint8_t, kReadPacketSize> request{
+        kPacketHeader, kPacketHeader, servo_id, kReadPacketLength, INST_READ,
+        static_cast<uint8_t>(address), kDataLength, kReserved
     };
-    request[7] = checksum(request, 2, 6);
+    finish_checksum(request.data(), static_cast<int>(kReadPacketSize));
 
-    if (!write_packet(fd, request, sizeof(request))) {
+    if (!write_packet(fd, request.data(), request.size())) {
         return ReadResult::Disconnected;
     }
 
-    uint8_t response[8] = {};
-    int total_bytes_read = 0;
+    std::array<uint8_t, kReadPacketSize> response{};
+    std::size_t total_bytes_read = 0;
     int attempts = 0;
-    while (total_bytes_read < 8 && attempts < 20) {
-        const ssize_t bytes_read = read(fd, response + total_bytes_read,
-                                        sizeof(response) - total_bytes_read);
+    while (total_bytes_read < kReadPacketSize && attempts < kReadAttempts) {
+        const ssize_t bytes_read = read(fd, response.data() + total_bytes_read,
+                                        response.size() - total_bytes_read);
         if (bytes_read > 0) {
-            total_bytes_read += static_cast<ssize_t>(bytes_read);
+            total_bytes_read += static_cast<std::size_t>(bytes_read);
             continue;
         }
         if (bytes_read < 0) {
@@ -86,65 +128,103 @@ ReadResult read_register_once(int fd, uint8_t servo_id, uint8_t address,
                 return ReadResult::Disconnected;
             }
             if (error == EINTR) {
+                ++attempts;
                 continue;
             }
         }
-        usleep(1000);
+        usleep(kReadRetryDelayMicroseconds);
         ++attempts;
     }
 
-    if (total_bytes_read < 8) {
+    if (total_bytes_read < kReadPacketSize) {
         return ReadResult::NoAnswer;
     }
-    if (response[0] != 0xFF || response[1] != 0xFF || response[2] != servo_id ||
-        checksum(response, 2, 6) != response[7]) {
+    if (response[0] != kPacketHeader || response[1] != kPacketHeader ||
+        response[kServoIdIndex] != servo_id ||
+        checksum(response.data(), 2, static_cast<int>(kReadPacketSize) - 2) !=
+            response[kReadPacketSize - 1]) {
         return ReadResult::NoAnswer;
     }
-    if (response[4] != 0x00) {
+    // Код ошибки в ответе означает, что параметры бессмысленны: мотора такого
+    // диапазона не существует. Принимать их за границы нельзя — иначе в
+    // motors уйдут углы, посчитанные от мусора.
+    if (response[kErrorCodeIndex] != 0x00) {
         std::cerr << "Servo Joint " << static_cast<int>(servo_id)
-                  << " reported error code: " << static_cast<int>(response[4])
-                  << std::endl;
+                  << " reported error code: "
+                  << static_cast<int>(response[kErrorCodeIndex]) << '\n';
+        return ReadResult::ServoError;
     }
 
-    value = response[5] | (static_cast<uint16_t>(response[6]) << 8);
+    value = static_cast<uint16_t>(response[kDataLowIndex]) |
+            static_cast<uint16_t>(static_cast<uint16_t>(response[kDataHighIndex])
+                                      << 8);
     return ReadResult::Ok;
 }
 
 // Читает регистр, переживая обрыв USB: адаптер мог отвалиться от хаба, и тогда
 // порт надо открыть заново, а мотора — спросить ещё раз.
-bool read_register(SerialPort& port, uint8_t servo_id, uint8_t address,
+bool read_register(SerialPort& port, uint8_t servo_id, Register address,
                    uint16_t& value) {
-    for (int attempt = 0; attempt < 2; ++attempt) {
+    for (int attempt = 0; attempt < kRegisterReadAttempts; ++attempt) {
         const ReadResult result =
             read_register_once(port.fd(), servo_id, address, value);
         if (result == ReadResult::Ok) {
             return true;
         }
-
-        if (result == ReadResult::Disconnected) {
-            std::cerr << "Servo bus " << port.path()
-                      << " disconnected, reconnecting..." << std::endl;
-        }
-        if (!port.reopen()) {
-            std::cerr << "Servo bus " << port.path()
-                      << " did not come back. Check the USB cable and the "
-                         "adapter's port." << std::endl;
+        if (result == ReadResult::ServoError) {
+            // Мотор ответил, но отказал: переподключение тут не поможет.
             return false;
         }
-        // Порт переоткрыт, но мотора сразу после переподключения может не
-        // быть слышно: повторяем попытку.
+        if (result == ReadResult::Disconnected) {
+            std::cerr << "Servo bus " << port.path()
+                      << " disconnected, reconnecting...\n";
+            if (!port.reopen()) {
+                std::cerr << "Servo bus " << port.path()
+                          << " did not come back. Check the USB cable and the "
+                             "adapter's port.\n";
+                return false;
+            }
+            // Порт переоткрыт, но мотора сразу после переподключения может
+            // не быть слышно: повторяем попытку.
+            continue;
+        }
+        // Мотор жив, но не ответил: первый запрос после переподключения
+        // иногда пропадает, поэтому просто повторяем, не трогая порт.
     }
     return false;
 }
+
+bool write_register(SerialPort& port, uint8_t servo_id, Register address,
+                    uint16_t value) {
+    std::array<uint8_t, kWritePacketSize> packet{
+        kPacketHeader, kPacketHeader, servo_id, kWritePacketLength, INST_WRITE,
+        static_cast<uint8_t>(address), static_cast<uint8_t>(value & 0xFF),
+        static_cast<uint8_t>((value >> 8) & 0xFF), kReserved
+    };
+    finish_checksum(packet.data(), static_cast<int>(kWritePacketSize));
+
+    return write_packet(port.fd(), packet.data(), packet.size());
 }
+
+bool write_byte_register(SerialPort& port, uint8_t servo_id, Register address,
+                         uint8_t value) {
+    std::array<uint8_t, kReadPacketSize> packet{
+        kPacketHeader, kPacketHeader, servo_id, kReadPacketLength, INST_WRITE,
+        static_cast<uint8_t>(address), value, kReserved
+    };
+    finish_checksum(packet.data(), static_cast<int>(kReadPacketSize));
+    return write_packet(port.fd(), packet.data(), packet.size());
+}
+}  // namespace
 
 SerialPort::SerialPort(const std::string& port)
     : port_(port), fd_(configure_serial_port(port.c_str())) {
 	if (fd_ < 0) {
-		// errno читается сразу: configure_serial_port ничего не меняет после
-		// неудачного open/tcgetattr, но полагаться на это не стоит.
-		throw std::runtime_error("Failed to open serial port " + port + ": " +
-		                         std::strerror(errno));
+		// errno читается сразу и до построения строки: порядок вычисления
+		// операндов operator+ не определён, а strerror отдаёт общий буфер.
+		const int error = errno;
+		throw ServoPortError("Failed to open serial port " + port + ": " +
+		                     std::strerror(error));
 	}
 }
 
@@ -174,7 +254,11 @@ SerialPort::~SerialPort() noexcept {
 	}
 }
 
-SerialPort::SerialPort(SerialPort&& other) noexcept : fd_(other.fd_) {
+SerialPort::SerialPort(SerialPort&& other) noexcept
+    : port_(std::move(other.port_)), fd_(other.fd_) {
+	// Путь переезжает вместе с дескриптором: перемещённый объект обязан
+	// остаться пригодным для reopen(), иначе он попытался бы открыть пустую
+	// строку.
 	other.fd_ = -1;
 }
 
@@ -183,6 +267,7 @@ SerialPort& SerialPort::operator=(SerialPort&& other) noexcept {
 		if (fd_ >= 0) {
 			close(fd_);
 		}
+		port_ = std::move(other.port_);
 		fd_ = other.fd_;
 		other.fd_ = -1;
 	}
@@ -224,91 +309,76 @@ int configure_serial_port(const char* port) {
     return fd;
 }
 
-bool read_servo_limits(SerialPort& port, uint8_t servo_id, ServoLimits& limits) {
-    if (!read_register(port, servo_id, REG_MIN_POSITION_LIMIT,
+std::optional<ServoLimits> read_servo_limits(SerialPort& port,
+                                              uint8_t servo_id) {
+    ServoLimits limits{};
+    if (!read_register(port, servo_id, Register::min_position_limit,
                        limits.min_position)) {
         std::cerr << "Joint " << static_cast<int>(servo_id)
-                  << ": failed to read the min position register (0x09)"
-                  << std::endl;
-        return false;
+                  << ": failed to read the min position register (0x09)\n";
+        return std::nullopt;
     }
-    if (!read_register(port, servo_id, REG_MAX_POSITION_LIMIT,
+    if (!read_register(port, servo_id, Register::max_position_limit,
                        limits.max_position)) {
         std::cerr << "Joint " << static_cast<int>(servo_id)
-                  << ": failed to read the max position register (0x0B)"
-                  << std::endl;
-        return false;
+                  << ": failed to read the max position register (0x0B)\n";
+        return std::nullopt;
     }
     if (limits.max_position <= limits.min_position) {
         std::cerr << "Joint " << static_cast<int>(servo_id)
                   << ": register limits are empty (" << limits.min_position
-                  << ".." << limits.max_position << ")" << std::endl;
-        return false;
+                  << ".." << limits.max_position << ")\n";
+        return std::nullopt;
     }
-    return true;
+    return limits;
 }
 
-bool read_all_servo_limits(SerialPort& port, ServoLimits limits[6]) {
-    for (uint8_t servo_id = 1; servo_id <= 6; ++servo_id) {
-        if (!read_servo_limits(port, servo_id, limits[servo_id - 1])) {
+std::optional<std::array<ServoLimits, kServoCount>> read_all_servo_limits(
+    SerialPort& port) {
+    std::array<ServoLimits, kServoCount> limits{};
+    for (std::size_t index = 0; index < kServoCount; ++index) {
+        const uint8_t servo_id = static_cast<uint8_t>(index + 1);
+        const std::optional<ServoLimits> motor_limits =
+            read_servo_limits(port, servo_id);
+        if (!motor_limits) {
             std::cerr << "Failed to read register limits from Joint "
-                      << static_cast<int>(servo_id) << std::endl;
-            return false;
+                      << static_cast<int>(servo_id) << '\n';
+            return std::nullopt;
         }
-        usleep(1000);
+        limits[index] = *motor_limits;
+        usleep(kInterServoDelayMicroseconds);
     }
-    return true;
+    return limits;
 }
 
-bool read_joint_angle(SerialPort& port, uint8_t servo_id, const ServoLimits& limits,
-                      float& angle_degrees) {
+std::optional<float> read_joint_angle(SerialPort& port, uint8_t servo_id,
+                                      const ServoLimits& limits) {
     uint16_t present_position = 0;
-    if (!read_register(port, servo_id, REG_PRESENT_POSITION, present_position)) {
-        return false;
+    if (!read_register(port, servo_id, Register::present_position,
+                       present_position)) {
+        return std::nullopt;
     }
     if (present_position < limits.min_position ||
         present_position > limits.max_position) {
         std::cerr << "Joint " << static_cast<int>(servo_id)
                   << " position is outside servo register limits: "
                   << present_position << " (limits " << limits.min_position
-                  << ".." << limits.max_position << ")" << std::endl;
-        return false;
+                  << ".." << limits.max_position << ")\n";
+        return std::nullopt;
     }
 
-    angle_degrees = limits.position_to_degrees(present_position);
-    return true;
-}
-
-bool write_register(SerialPort& port, uint8_t servo_id, uint8_t address,
-                   uint16_t value) {
-    uint8_t packet[9] = {
-        0xFF, 0xFF, servo_id, 0x05, INST_WRITE, address,
-        static_cast<uint8_t>(value & 0xFF),
-        static_cast<uint8_t>((value >> 8) & 0xFF), 0x00
-    };
-    packet[8] = checksum(packet, 2, 7);
-
-    return write_packet(port.fd(), packet, sizeof(packet));
-}
-
-bool write_byte_register(SerialPort& port, uint8_t servo_id, uint8_t address,
-                         uint8_t value) {
-    uint8_t packet[8] = {
-        0xFF, 0xFF, servo_id, 0x04, INST_WRITE, address, value, 0x00
-    };
-    packet[7] = checksum(packet, 2, 6);
-    return write_packet(port.fd(), packet, sizeof(packet));
+    return static_cast<float>(limits.position_to_degrees(present_position));
 }
 
 bool disable_servo_torque(SerialPort& port, uint8_t servo_id) {
-    if (!write_byte_register(port, servo_id, REG_TORQUE_ENABLE, 0)) {
+    if (!write_byte_register(port, servo_id, Register::torque_enable, 0)) {
         std::cerr << "Failed to disable torque on Joint "
-                  << static_cast<int>(servo_id) << std::endl;
+                  << static_cast<int>(servo_id) << '\n';
         return false;
     }
 
     std::cout << "Torque disabled on Joint "
-              << static_cast<int>(servo_id) << std::endl;
+              << static_cast<int>(servo_id) << '\n';
     return true;
 }
 
@@ -320,26 +390,26 @@ bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,
     if (angle_degrees > max_angle) {
         std::cerr << "Angle " << angle_degrees << " is outside Joint "
                   << static_cast<int>(servo_id) << " range 0.." << max_angle
-                  << " degrees" << std::endl;
+                  << " degrees\n";
         return false;
     }
 
     const uint16_t steps = limits.degrees_to_position(angle_degrees);
-    if (!write_register(port, servo_id, REG_GOAL_VELOCITY, speed)) {
+    if (!write_register(port, servo_id, Register::goal_velocity, speed)) {
         std::cerr << "Failed to transmit speed to Joint "
-                  << static_cast<int>(servo_id) << std::endl;
+                  << static_cast<int>(servo_id) << '\n';
         return false;
     }
-    usleep(3000);
+    usleep(kVelocityToPositionDelayMicroseconds);
 
-    if (!write_register(port, servo_id, REG_GOAL_POSITION, steps)) {
+    if (!write_register(port, servo_id, Register::goal_position, steps)) {
         std::cerr << "Failed to transmit packet to Joint "
-                  << static_cast<int>(servo_id) << std::endl;
+                  << static_cast<int>(servo_id) << '\n';
         return false;
     }
 
     std::cout << "Joint " << static_cast<int>(servo_id)
               << " commanded to " << angle_degrees << " degrees ("
-              << steps << " steps, speed " << speed << ")." << std::endl;
+              << steps << " steps, speed " << speed << ").\n";
     return true;
 }

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -21,6 +22,17 @@ std::string expand_home(const std::string& path) {
     return home == nullptr ? path : std::string(home) + path.substr(1);
 }
 
+uint16_t joint_speed(uint16_t base_speed, double divisor, int joint_index) {
+    const double factor = std::pow(divisor, static_cast<double>(joint_index));
+    const double scaled = static_cast<double>(base_speed) / factor;
+    const double clamped = std::clamp(scaled,
+                                      static_cast<double>(kMinMotorSpeed),
+                                      static_cast<double>(kMaxMotorSpeed));
+    // Округление, а не усечение: скорость 499.99998 должна стать 500, а не
+    // 499. И сразу в uint16_t — clamped уже в диапазоне.
+    return static_cast<uint16_t>(std::lround(clamped));
+}
+
 bool load_config(const std::string& path, ControlConfig& config) {
     std::ifstream file(path);
     if (!file) return false;
@@ -33,7 +45,7 @@ bool load_config(const std::string& path, ControlConfig& config) {
         const unsigned int speed = data.at("speed").get<unsigned int>();
         config.speed = static_cast<uint16_t>(speed);
         config.joint_speed_divisor =
-            data.at("joint_speed_divisor").get<float>();
+            data.at("joint_speed_divisor").get<double>();
         config.cartesian_step_m = data.at("cartesian_step_m").get<double>();
         config.ik_damping = data.at("ik_damping").get<double>();
         config.ik_max_iterations = data.at("ik_max_iterations").get<int>();
@@ -42,9 +54,9 @@ bool load_config(const std::string& path, ControlConfig& config) {
         config.ik_max_joint_step_rad =
             data.at("ik_max_joint_step_rad").get<double>();
         return !config.port.empty() && !config.end_effector.empty() &&
-               speed >= 1 && speed <= 1000 &&
+               speed >= kMinMotorSpeed && speed <= kMaxMotorSpeed &&
                std::isfinite(config.joint_speed_divisor) &&
-               config.joint_speed_divisor > 0.0f &&
+               config.joint_speed_divisor > 0.0 &&
                std::isfinite(config.cartesian_step_m) &&
                config.cartesian_step_m > 0.0 &&
                std::isfinite(config.ik_damping) && config.ik_damping > 0.0 &&
@@ -55,7 +67,7 @@ bool load_config(const std::string& path, ControlConfig& config) {
                std::isfinite(config.ik_max_joint_step_rad) &&
                config.ik_max_joint_step_rad > 0.0;
     } catch (const std::exception& error) {
-        std::cerr << "Invalid " << path << ": " << error.what() << std::endl;
+        std::cerr << "Invalid " << path << ": " << error.what() << '\n';
         return false;
     }
 }
