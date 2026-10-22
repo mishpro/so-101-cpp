@@ -150,6 +150,20 @@ so101::IkParams drawing_ik_params(const ControlConfig& config) {
 	return params;
 }
 
+// Программа закончилась — рука больше не нужна, и моторы расслабляются:
+// иначе её нельзя поправить руками, а сервоприводы держат позицию с
+// моментом около 11 кг·см. Рука при этом провисает под тяжестью — её надо
+// держать.
+void release_arm(so101::SerialArmFeedback& arm) {
+	so101::JointMask all{};
+	all.fill(true);
+	if (arm.relax_motors(all)) {
+		std::cout << "\nМоторы расслаблены: руку можно двигать рукой. Держите "
+		             "её — она провиснет.\n"
+		          << std::flush;
+	}
+}
+
 int capture_mode(ControlConfig& config, so101::ArmModel& model,
                  const std::string& plane_path, double tilt_tolerance_deg) {
 	SerialPort port(config.port);
@@ -172,6 +186,9 @@ int capture_mode(ControlConfig& config, so101::ArmModel& model,
 
 	if (!result.accepted) {
 		std::cerr << "Plane was not captured: " << result.error << '\n';
+		// Захват не состоялся, но программа закончилась: руку надо оставить
+		// в руках человека.
+		release_arm(arm);
 		return 1;
 	}
 
@@ -189,6 +206,9 @@ int capture_mode(ControlConfig& config, so101::ArmModel& model,
 	          << "  tilt at contact " << std::setprecision(2)
 	          << result.plane.tilt_deg << " deg\n"
 	          << "Saved to " << plane_path << '\n';
+
+	// Захват закончен: рука больше не нужна, моторы расслабляются.
+	release_arm(arm);
 	return 0;
 }
 
@@ -213,9 +233,14 @@ int draw_mode(ControlConfig& config, so101::ArmModel& model,
 
 	so101::SerialArmFeedback arm(port, *limits, speed, config.joint_speed_divisor);
 
+	// С этого момента программа обязана оставить руку в руках человека, как
+	// бы ни кончилась: иначе её нельзя поправить руками. Аварийный выход
+	// (исключение, сигнал) моторы оставит включёнными — рука удержит
+	// позицию и не провиснет.
 	const std::optional<so101::JointDegrees> current = arm.read_joint_degrees();
 	if (!current) {
 		std::cerr << "Failed to read the current joint angles\n";
+		release_arm(arm);
 		return 1;
 	}
 
@@ -246,6 +271,7 @@ int draw_mode(ControlConfig& config, so101::ArmModel& model,
 	if (!check.reachable) {
 		std::cerr << "The circle is not reachable from the current pose: "
 		          << "some point cannot be solved with a vertical tool.\n";
+		release_arm(arm);
 		return 1;
 	}
 
@@ -280,6 +306,9 @@ int draw_mode(ControlConfig& config, so101::ArmModel& model,
 		if (!so101::draw_trajectory(arm, model, targets, ik_params, options,
 		                            report, error)) {
 			std::cerr << "Drawing stopped: " << error << '\n';
+			// Рисование закончено, чем бы оно ни кончилось: рука больше не
+			// нужна, и её надо оставить в руках человека.
+			release_arm(arm);
 			return 1;
 		}
 	}
@@ -288,6 +317,10 @@ int draw_mode(ControlConfig& config, so101::ArmModel& model,
 	          << std::fixed << std::setprecision(3)
 	          << report.max_position_error_m * 1000.0 << " mm, max tilt "
 	          << std::setprecision(3) << report.max_tilt_deg << " deg\n";
+
+	// Программа закончилась — моторы расслабляются, руку можно править
+	// руками.
+	release_arm(arm);
 	return 0;
 }
 

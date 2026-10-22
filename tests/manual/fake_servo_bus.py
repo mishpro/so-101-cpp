@@ -187,7 +187,14 @@ class FakeServoBus:
     def _handle_write(self, packet: bytes) -> None:
         servo_id = packet[2]
         address = packet[5]
-        value = packet[6] | (packet[7] << 8)
+        # Запись одного байта (переключатель момента) — восемь байт, и данные
+        # занимают один байт; запись двух байт (цель, скорость) — девять, и
+        # старший байт данных второй. Считать всегда два байта нельзя: в
+        # восьмибайтовом пакете восьмой — контрольная сумма.
+        if len(packet) == 8:
+            value = packet[6]
+        else:
+            value = packet[6] | (packet[7] << 8)
         self.writes.append((servo_id, address, value))
         if 0 <= servo_id - 1 < 6 and address == REG_GOAL_POSITION:
             self.goal_positions[servo_id - 1] = value
@@ -219,3 +226,9 @@ class FakeServoBus:
         return [(servo_id, value)
                 for servo_id, written_address, value in self.writes
                 if written_address == address]
+
+    def torque_switch(self, servo_id: int) -> int | None:
+        """Последнее записанное значение переключателя момента (1 — держит)."""
+        values = [value for written_servo, address, value in self.writes
+                  if address == REG_TORQUE_ENABLE and written_servo == servo_id]
+        return values[-1] if values else None

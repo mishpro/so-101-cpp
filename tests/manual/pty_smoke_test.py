@@ -369,6 +369,12 @@ def scenario_draw_circle_on_fake_bus() -> None:
             check("tcp_height_m" in plane, "в файле плоскости есть высота TCP")
             check("tilt_deg" in plane, "в файле плоскости есть наклон")
 
+        # После захвата моторы должны быть расслаблены: руку надо править
+        # руками, пока программа не работает.
+        relaxed = [bus.torque_switch(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после захвата все моторы расслаблены", str(relaxed))
+
         # Рисование: центр окружности — в точке касания, так что окружность
         # рядом с текущей позой и IK обязан сойтись.
         if not plane_path.exists():
@@ -386,6 +392,9 @@ def scenario_draw_circle_on_fake_bus() -> None:
         after = len(bus.writes_to(REG_GOAL_POSITION))
         check(after > before, "в моторы ушли цели по окружности",
               f"{before} -> {after}")
+        relaxed = [bus.torque_switch(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после рисования все моторы расслаблены", str(relaxed))
 
 
 def main() -> int:
