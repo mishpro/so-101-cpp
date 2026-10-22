@@ -91,6 +91,29 @@ std::string format_degrees(double value) {
 	return text.str();
 }
 
+// Остаток: насколько рука не дошла до цели.
+//
+// Без него сообщение о неудаче ничего не объясняет: «не достигнуто»
+// одинаково выглядит и когда руку зажало бумагой, и когда допуск слишком
+// строг. Печатаются и углы (в каком суставе застряли), и расстояние от TCP
+// до цели (насколько это в миллиметрах).
+std::string describe_residual(const ArmModel& model,
+                              const JointDegrees& actual,
+                              const JointDegrees& wanted, double distance_m,
+                              double tilt_deg) {
+	std::ostringstream text;
+	text << "\n  остаток по суставам (факт / цель / Δ):";
+	for (std::size_t index = 0; index < model.ik_joints.size(); ++index) {
+		text << "\n    " << model.model.names[model.ik_joints[index]] << ": "
+		     << std::fixed << std::setprecision(2) << actual[index] << " / "
+		     << wanted[index] << " / " << (actual[index] - wanted[index]) << "°";
+	}
+	text << "\n  расстояние от TCP до цели: " << std::fixed
+	     << std::setprecision(1) << distance_m * 1000.0 << " мм,  наклон: "
+	     << std::setprecision(2) << tilt_deg << "°";
+	return text.str();
+}
+
 }  // namespace
 
 CaptureResult capture_plane(ArmFeedback& arm, ArmModel& model,
@@ -276,8 +299,10 @@ bool draw_trajectory(ArmFeedback& arm, ArmModel& model,
 			error = "Point " + std::to_string(index + 1) + " of " +
 			        std::to_string(targets.size()) +
 			        " is unreachable: position error " +
-			        std::to_string(ik.final_error_m) + " m, tilt " +
-			        std::to_string(ik.final_orientation_error_rad) + " rad";
+			        std::to_string(ik.final_error_m * 1000.0) + " mm, tilt " +
+			        std::to_string(ik.final_orientation_error_rad * 180.0 /
+			                        kPiExecution) +
+			        " deg";
 			return false;
 		}
 		q = ik.q;
@@ -320,10 +345,37 @@ bool draw_trajectory(ArmFeedback& arm, ArmModel& model,
 			}
 			if (std::chrono::steady_clock::now() > deadline) {
 				++report.timeouts;
+
+				// Где именно рука остановилась: без этого «не достигнуто»
+				// ничего не объясняет.
+				Eigen::VectorXd reached_q = angles_to_q(model, *actual);
+				pinocchio::forwardKinematics(model.model, model.data, reached_q);
+				pinocchio::updateFramePlacements(model.model, model.data);
+				const double distance =
+				    (targets[index] - model.data.oMf[model.frame_id].translation())
+				        .norm();
+				const double tilt = tilt_degrees(tool_axis(model));
+
 				error = "Point " + std::to_string(index + 1) + " of " +
 				        std::to_string(targets.size()) +
 				        " was not reached in " + std::to_string(timeout) +
-				        " ms; the arm is held in place";
+				        " ms; the arm is held in place" +
+				        describe_residual(model, *actual, degrees, distance, tilt);
+				// Что именно не так — по расстоянию до цели, а не по углам:
+				// разница углов бывает и при руке, стоящей точно на месте
+				// (другая ветвь избыточности, инструмент при этом наклонён).
+				if (distance > 0.005) {
+					error +=
+					    "\n  рука далеко от цели: она стоит или зажата "
+					    "(бумагой, столом) — либо моторы расслаблены";
+				} else if (tilt > 5.0) {
+					error += "\n  рука на месте, но инструмент наклонён на " +
+					         std::to_string(tilt) +
+					         "°: вертикальный инструмент не получился";
+				} else {
+					error += "\n  рука на месте, но остаток превышает допуск " +
+					         std::to_string(options.reach_tolerance_deg) + "°";
+				}
 				return false;
 			}
 			std::this_thread::sleep_for(

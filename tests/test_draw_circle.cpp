@@ -50,6 +50,8 @@ public:
 	JointMask held{};
 	bool fail_reads{false};
 	bool fail_writes{false};
+	// Рука принимает команду, но не едет: как зажатая бумагой.
+	bool ignore_writes{false};
 
 	std::optional<JointDegrees> read_joint_degrees() override {
 		if (fail_reads) return std::nullopt;
@@ -59,7 +61,7 @@ public:
 	bool write_joint_degrees(const JointDegrees& degrees) override {
 		if (fail_writes) return false;
 		written.push_back(degrees);
-		angles = degrees;
+		if (!ignore_writes) angles = degrees;
 		return true;
 	}
 
@@ -230,6 +232,39 @@ void test_draw_trajectory_stops_on_lost_bus(const so101::ArmModel& model_templat
 	CHECK(!report.completed);
 }
 
+// Рука не доходит до цели: в сообщении должен быть остаток — по каким
+// углам и на сколько миллиметров. Без него «не достигнуто» ничего не
+// объясняет: и зажатая бумагой рука, и слишком строгий допуск выглядят
+// одинаково.
+void test_draw_trajectory_reports_residual(const so101::ArmModel& model_template) {
+	so101::ArmModel model = model_template;
+	so101::IkParams params;
+	params.max_iterations = 300;
+	params.position_tolerance_m = 0.001;
+	params.orientation_tolerance_rad = 0.01;
+
+	// Рука стоит на месте и не реагирует на команды: как зажатая бумагой.
+	StubArm arm;
+	arm.angles = q_to_degrees(model, pinocchio::neutral(model.model));
+	arm.ignore_writes = true;
+
+	const std::vector<Eigen::Vector3d> targets{
+	    Eigen::Vector3d{0.25, 0.0, 0.02}};
+
+	so101::DrawOptions options;
+	options.reach_timeout_ms = 60;
+	options.poll_interval_ms = 5;
+	so101::DrawReport report;
+	std::string error;
+	CHECK(!so101::draw_trajectory(arm, model, targets, params, options, report,
+	                               error));
+	CHECK(error.find("остаток") != std::string::npos);
+	CHECK(error.find("shoulder_pan") != std::string::npos);
+	CHECK(error.find("расстояние от TCP до цели") != std::string::npos);
+	// Рука стоит далеко от цели — об этом и сказано.
+	CHECK(error.find("рука далеко от цели") != std::string::npos);
+}
+
 // Захват плоскости: моторы расслабляются, человек «нажимает Enter», и
 // программа возвращает моторы в работу, записав текущую позу целью.
 void test_capture_plane_on_stub(const so101::ArmModel& model_template) {
@@ -334,6 +369,7 @@ int main() {
 	test_plane_file();
 	test_draw_trajectory_on_stub(arm);
 	test_draw_trajectory_stops_on_lost_bus(arm);
+	test_draw_trajectory_reports_residual(arm);
 	test_capture_plane_on_stub(arm);
 	test_ik_along_the_circle(arm);
 
