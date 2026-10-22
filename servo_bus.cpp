@@ -128,7 +128,11 @@ enum class ReadResult { Ok, NoAnswer, ServoError };
 
 ReadResult read_register_once(int fd, uint8_t servo_id, Register address,
                               uint16_t& value) {
-    tcflush(fd, TCIOFLUSH);
+    // Сбрасывается только вход: в нём могли остаться подтверждения от
+    // предыдущей записи, и их надо выбросить. Выход трогать нельзя — в
+    // нём может лежать команда, которую мотор ещё не получил, и сброс
+    // входа вместе с выходом (TCIOFLUSH) её бы уничтожил.
+    tcflush(fd, TCIFLUSH);
 
     std::array<uint8_t, kReadPacketSize> request{
         kPacketHeader, kPacketHeader, servo_id, kReadPacketLength, INST_READ,
@@ -544,28 +548,53 @@ std::optional<float> read_joint_angle(SerialPort& port, uint8_t servo_id,
     return static_cast<float>(limits.position_to_degrees(present_position));
 }
 
-bool disable_servo_torque(SerialPort& port, uint8_t servo_id) {
-	if (!write_byte_register(port, servo_id, Register::torque_enable, 0)) {
-		std::cerr << "Failed to disable torque on Joint "
-		          << static_cast<int>(servo_id) << '\n';
-		return false;
+std::optional<bool> read_servo_torque_enabled(SerialPort& port, uint8_t servo_id) {
+	uint16_t value = 0;
+	if (!read_register(port, servo_id, Register::torque_enable, value)) {
+		return std::nullopt;
+	}
+	return value != 0;
+}
+
+// Команда удержания с проверкой результата.
+//
+// Мотор подтверждает результат чтением своего регистра: шина теряет кадры,
+// и молчалившая потеря выглядит как «программа отработала, моторы
+// расслаблены», хотя часть из них держит позицию до сих пор. Команда
+// повторяется, пока мотор её не подтвердит.
+bool set_servo_torque(SerialPort& port, uint8_t servo_id, bool enabled) {
+	const char* action = enabled ? "enable" : "disable";
+	for (int attempt = 1; attempt <= kTorqueCommandAttempts; ++attempt) {
+		// Пауза перед записью: предыдущий кадр мог ещё не перевариться.
+		usleep(kMotorCommandDelayMicroseconds);
+		if (!write_byte_register(port, servo_id, Register::torque_enable,
+		                         enabled ? 1 : 0)) {
+			std::cerr << "Failed to " << action << " torque on Joint "
+			          << static_cast<int>(servo_id) << '\n';
+			return false;
+		}
+
+		const std::optional<bool> actual =
+		    read_servo_torque_enabled(port, servo_id);
+		if (actual && *actual == enabled) {
+			std::cout << "Torque " << (enabled ? "enabled" : "disabled")
+			          << " on Joint " << static_cast<int>(servo_id) << '\n';
+			return true;
+		}
 	}
 
-	std::cout << "Torque disabled on Joint "
-	          << static_cast<int>(servo_id) << '\n';
-	return true;
+	std::cerr << "Joint " << static_cast<int>(servo_id) << " did not "
+	          << action << " the torque after " << kTorqueCommandAttempts
+	          << " attempts\n";
+	return false;
+}
+
+bool disable_servo_torque(SerialPort& port, uint8_t servo_id) {
+	return set_servo_torque(port, servo_id, false);
 }
 
 bool enable_servo_torque(SerialPort& port, uint8_t servo_id) {
-	if (!write_byte_register(port, servo_id, Register::torque_enable, 1)) {
-		std::cerr << "Failed to enable torque on Joint "
-		          << static_cast<int>(servo_id) << '\n';
-		return false;
-	}
-
-	std::cout << "Torque enabled on Joint "
-	          << static_cast<int>(servo_id) << '\n';
-	return true;
+	return set_servo_torque(port, servo_id, true);
 }
 
 bool write_joint_angle(SerialPort& port, uint8_t servo_id, float angle_degrees,

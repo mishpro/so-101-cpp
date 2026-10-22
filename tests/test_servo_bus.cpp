@@ -24,7 +24,12 @@ namespace {
 
 constexpr uint8_t REG_MIN_POSITION_LIMIT = 0x09;
 constexpr uint8_t REG_MAX_POSITION_LIMIT = 0x0B;
+constexpr uint8_t REG_TORQUE_ENABLE = 0x28;
 constexpr uint8_t REG_PRESENT_POSITION = 0x38;
+
+// Байт команды в кадре: 0x02 — чтение, 0x03 — запись.
+constexpr uint8_t INST_READ = 0x02;
+constexpr uint8_t INST_WRITE = 0x03;
 
 // Длина кадра в байтах — как в настоящем протоколе STS3215.
 constexpr std::size_t kFrameSize = 8;
@@ -76,6 +81,19 @@ public:
 	// Мотор перестаёт отвечать, но шина остаётся живой.
 	void mute(uint8_t servo_id) { muted_ = servo_id; }
 
+	// Сколько первых команд удержания шина «потеряет»: запись в порт
+	// удалась, а мотор её не увидел. Настоящий STS3215 так себя ведёт,
+	// если следующий кадр приходит, пока предыдущий не переварен.
+	void drop_torque_writes(int count) { drop_torque_writes_ = count; }
+
+	// Действующее состояние удержания мотора (1 — держит позицию).
+	[[nodiscard]] int torque_state(uint8_t servo_id) const {
+		return torque_[servo_id - 1];
+	}
+
+	// Сколько команд удержания дошло до мотора.
+	[[nodiscard]] int torque_writes() const { return torque_writes_; }
+
 	// Молчит вся шина: ни один мотор не отвечает.
 	void mute_all() { mute_everything_ = true; }
 
@@ -121,6 +139,19 @@ private:
 			if (mute_everything_ || servo_id == muted_) {
 				continue;  // молчим: на запрос не отвечаем вовсе
 			}
+			if (request[4] == INST_WRITE) {
+				// Запись одного байта: значение в шестом байте кадра.
+				if (address == REG_TORQUE_ENABLE && servo_id >= 1 &&
+				    servo_id <= 6) {
+					++torque_writes_;
+					if (drop_torque_writes_ > 0) {
+						--drop_torque_writes_;  // кадр потерян
+					} else {
+						torque_[servo_id - 1] = request[6];
+					}
+				}
+				continue;  // на запись ответа с регистром не бывает
+			}
 			uint16_t value = 0;
 			if (servo_id >= 1 && servo_id <= 6) {
 				const std::size_t index = servo_id - 1;
@@ -130,6 +161,8 @@ private:
 					value = maximums_[index];
 				} else if (address == REG_PRESENT_POSITION) {
 					value = present_[index];
+				} else if (address == REG_TORQUE_ENABLE) {
+					value = static_cast<uint16_t>(torque_[index]);
 				}
 			}
 			std::array<uint8_t, kFrameSize> reply{
@@ -145,6 +178,9 @@ private:
 	std::vector<uint16_t> minimums_;
 	std::vector<uint16_t> maximums_;
 	std::vector<uint16_t> present_;
+	std::vector<int> torque_{6, 1};  // по умолчанию сервопривод держит позицию
+	int torque_writes_{0};
+	int drop_torque_writes_{0};
 	uint8_t error_code_{0};
 	uint8_t muted_{0};
 	bool mute_everything_{false};
@@ -542,6 +578,63 @@ void test_recovers_after_adapter_returns() {
 
 }  // namespace
 
+// Команда удержания проверяется чтением регистра и повторяется, пока мотор
+// её не подтвердил.
+//
+// Шина STS3215 теряет кадры, если следующий приходит, пока предыдущий не
+// переварен: запись в порт удаётся, а мотор команду не выполняет. Молча
+// об этом узнать нельзя — только спросив у мотора. Программа, которая
+// расслабляет руку по окончании, обязана это учитывать: иначе часть
+// моторов остаётся держащей позицию, а отчёт говорит, что всё расслаблено.
+void test_torque_command_is_repeated_until_confirmed() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.drop_torque_writes(2);  // первые две команды удержания теряются
+	emulator.start();
+
+	SerialPort port(pair.path);
+	CHECK_MSG(disable_servo_torque(port, 1),
+	          "the torque command must be repeated until the motor confirms it");
+	CHECK_MSG(emulator.torque_state(1) == 0,
+	          "the motor must actually release the torque");
+	CHECK_MSG(emulator.torque_writes() >= 3, "the lost commands must be repeated");
+
+	emulator.stop();
+}
+
+// Мотор, который так и не отпустил удержание, называется по имени: иначе
+// о пропаже мотора узнают по тому, что рука не двигается.
+void test_motor_that_never_releases_is_reported() {
+	PtyPair pair = open_pair();
+	if (pair.master < 0) {
+		CHECK_MSG(false, "openpty failed: no pseudo-terminal available");
+		return;
+	}
+
+	const std::vector<uint16_t> minimums = {767, 812, 886, 900, 260, 1420};
+	const std::vector<uint16_t> maximums = {3328, 3197, 3107, 3166, 4050, 2620};
+	ServoEmulator emulator(pair.master, minimums, maximums);
+	emulator.drop_torque_writes(1000);  // мотор не выполнит команду никогда
+	emulator.start();
+
+	SerialPort port(pair.path);
+	CapturedStderr capture;
+	const bool disabled = disable_servo_torque(port, 1);
+	const std::string errors = capture.restore();
+	CHECK_MSG(!disabled, "the program must report the failure");
+	CHECK_MSG(errors.find("Joint 1") != std::string::npos,
+	          "the failing motor must be named");
+
+	emulator.stop();
+}
+
 int main() {
 	test_read_limits_over_pty();
 	test_port_is_opened_at_bus_speed();
@@ -552,5 +645,7 @@ int main() {
 	test_recovers_after_adapter_returns();
 	test_disconnect_is_detected();
 	test_reopen_restores_port();
+	test_torque_command_is_repeated_until_confirmed();
+	test_motor_that_never_releases_is_reported();
 	return so101_test::finish("servo_bus");
 }

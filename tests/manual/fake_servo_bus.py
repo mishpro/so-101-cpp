@@ -66,6 +66,14 @@ class FakeServoBus:
         # ждать бессмысленно: они упрутся в таймаут.
         self.follow_goal = follow_goal
         self.writes: list[tuple[int, int, int]] = []
+        # Состояние удержания каждого мотора: сервопривод по умолчанию
+        # держит позицию, и программа читает это состояние обратно, чтобы
+        # убедиться, что команда дошла.
+        self.torque_switches = [1] * 6
+        # Сколько ещё кадров записи переключателя момента шина «потеряет».
+        # Настоящий STS3215 теряет кадры, если следующий приходит, пока
+        # предыдущий не переварен, — программа обязана это переживать.
+        self.drop_torque_writes = 0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._master = -1
@@ -196,6 +204,12 @@ class FakeServoBus:
         else:
             value = packet[6] | (packet[7] << 8)
         self.writes.append((servo_id, address, value))
+        if 0 <= servo_id - 1 < 6 and address == REG_TORQUE_ENABLE:
+            if self.drop_torque_writes > 0:
+                # Кадр потерян: запись в порт удалась, а мотор её не увидел.
+                self.drop_torque_writes -= 1
+            else:
+                self.torque_switches[servo_id - 1] = value
         if 0 <= servo_id - 1 < 6 and address == REG_GOAL_POSITION:
             self.goal_positions[servo_id - 1] = value
             if self.follow_goal:
@@ -214,7 +228,7 @@ class FakeServoBus:
         if address == REG_GOAL_VELOCITY:
             return 0
         if address == REG_TORQUE_ENABLE:
-            return 1
+            return self.torque_switches[index]
         return 0
 
     # --- проверки -------------------------------------------------------
@@ -232,3 +246,7 @@ class FakeServoBus:
         values = [value for written_servo, address, value in self.writes
                   if address == REG_TORQUE_ENABLE and written_servo == servo_id]
         return values[-1] if values else None
+
+    def torque_state(self, servo_id: int) -> int:
+        """Действующее состояние удержания мотора (1 — держит позицию)."""
+        return self.torque_switches[servo_id - 1]

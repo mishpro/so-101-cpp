@@ -1,5 +1,7 @@
 #include "serial_arm.hpp"
 
+#include <unistd.h>
+
 #include "control_config.hpp"
 
 namespace so101 {
@@ -26,6 +28,9 @@ bool SerialArmFeedback::write_joint_degrees(const JointDegrees& degrees) {
 		                              static_cast<float>(degrees[index]), speed,
 		                              limits_[index], false) &&
 		            succeeded;
+		// Моторы не успевают переваривать кадры подряд: без паузы часть
+		// команд теряется, и рука едет мимо цели.
+		usleep(kMotorCommandDelayMicroseconds);
 	}
 	return succeeded;
 }

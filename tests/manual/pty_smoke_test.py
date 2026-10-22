@@ -33,6 +33,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from fake_servo_bus import (  # noqa: E402
     REG_GOAL_POSITION,
+    REG_TORQUE_ENABLE,
     FakeServoBus,
 )
 
@@ -371,7 +372,7 @@ def scenario_draw_circle_on_fake_bus() -> None:
 
         # После захвата моторы должны быть расслаблены: руку надо править
         # руками, пока программа не работает.
-        relaxed = [bus.torque_switch(servo) for servo in range(1, 7)]
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
         check(all(value == 0 for value in relaxed),
               "после захвата все моторы расслаблены", str(relaxed))
 
@@ -392,9 +393,39 @@ def scenario_draw_circle_on_fake_bus() -> None:
         after = len(bus.writes_to(REG_GOAL_POSITION))
         check(after > before, "в моторы ушли цели по окружности",
               f"{before} -> {after}")
-        relaxed = [bus.torque_switch(servo) for servo in range(1, 7)]
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
         check(all(value == 0 for value in relaxed),
               "после рисования все моторы расслаблены", str(relaxed))
+
+
+def scenario_torque_release_survives_lost_frames() -> None:
+    print("\n9. Расслабление моторов переживает потерю кадров")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True) as bus:
+        # Шина теряет первые четыре кадра записи удержания: моторы их не
+        # видят. Программа обязана это заметить (спросив у моторов) и
+        # повторить команду.
+        bus.drop_torque_writes = 4
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0,
+              "захват завершился успешно, несмотря на потерю кадров",
+              capture.stderr.strip()[:400])
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после захвата все моторы расслаблены", str(relaxed))
+        torque_writes = len(bus.writes_to(REG_TORQUE_ENABLE))
+        check(torque_writes > 6,
+              "потерянные команды были повторены",
+              f"записей удержания: {torque_writes}")
 
 
 def main() -> int:
@@ -413,6 +444,7 @@ def main() -> int:
     scenario_show_limits_without_urdf()
     scenario_generator_reads_bus()
     scenario_draw_circle_on_fake_bus()
+    scenario_torque_release_survives_lost_frames()
 
     print()
     if failures:

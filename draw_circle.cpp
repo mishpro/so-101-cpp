@@ -195,6 +195,8 @@ int capture_mode(ControlConfig& config, so101::ArmModel& model,
 	std::string error;
 	if (!so101::save_plane(plane_path, result.plane, error)) {
 		std::cerr << "Failed to save the plane: " << error << '\n';
+		// Программа закончилась — руку надо оставить в руках человека.
+		release_arm(arm);
 		return 1;
 	}
 
@@ -260,6 +262,7 @@ int draw_mode(ControlConfig& config, so101::ArmModel& model,
 	    so101::circle_targets(plane, circle, press_m, position);
 	if (targets.empty()) {
 		std::cerr << "The circle has no points\n";
+		release_arm(arm);
 		return 1;
 	}
 

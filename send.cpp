@@ -293,6 +293,18 @@ int main(int argc, char** argv) {
         }
 
         bool all_commands_succeeded = true;
+
+        // Мотор без удержания момента команду не выполняет: цель принимается,
+        // а сустав не двигается. Программа, которая двигает руку, обязана
+        // сначала включить удержание — иначе обещание «Joint 1 commanded to
+        // 90 degrees» было бы враньём.
+        for (const auto& command : commands) {
+            if (!enable_servo_torque(port_handle, command.first)) {
+                all_commands_succeeded = false;
+            }
+            usleep(kInterCommandDelayMicroseconds);
+        }
+
         for (const auto& command : commands) {
             const uint16_t motor_speed = joint_speed(
                 speed, config.joint_speed_divisor,
