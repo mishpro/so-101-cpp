@@ -15,7 +15,14 @@
   5. маркер --show-limits не путает недоступный URDF минимум мотора;
   6. send --show-limits честно отказывается, если URDF недоступен;
   7. генератор URDF читает границы с шины и перегенерирует файл;
-  8. захват плоскости и рисование круга проходят весь путь по шине.
+  8. захват плоскости и рисование круга проходят весь путь по шине;
+  9. расслабление моторов переживает потерю кадров;
+ 10. без нагрузки на моторах рисование продолжается: след без нажима;
+  11. с ключом --no-contact нагрузка не читается вовсе — ни при захвате,
+      ни при рисовании;
+  12. круг с недостижимыми точками рисуется по приближению, и команда
+      моторам на недостижимой точке отличается от предыдущей;
+  13. касание не найдено: сказано почему и на какой высоте.
 
 Запуск: python3 tests/manual/pty_smoke_test.py
 """
@@ -349,7 +356,11 @@ def scenario_draw_circle_on_fake_bus() -> None:
     # Поза не вытянутая: у вытянутой руки вертикальный инструмент
     # недостижим (рабочая область кончается), и проверять было бы нечего.
     present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
-    with FakeServoBus(mins, maxs, present, follow_goal=True) as bus:
+    # Мёртвая зона мотора: настоящий STS3215 до своей цели не доходит, и
+    # из-за этого рисование останавливалось на первой точке. Зона
+    # воспроизводится в отсчётах мотора.
+    with FakeServoBus(mins, maxs, present, follow_goal=True,
+                      deadband_steps=20) as bus:
         port = bus.start()
         workspace = build_config(port)
         plane_path = pathlib.Path(workspace) / "draw_plane.json"
@@ -381,6 +392,9 @@ def scenario_draw_circle_on_fake_bus() -> None:
         if not plane_path.exists():
             check(False, "файл плоскости существует для рисования")
             return
+        # Бумага там, где её оставил захват: после касания рука стоит на
+        # цели, то есть на поверхности.
+        bus.paper_steps = list(bus.goal_positions)
         plane = json.loads(plane_path.read_text())
         before = len(bus.writes_to(REG_GOAL_POSITION))
         draw = run("draw_circle", workspace,
@@ -396,6 +410,9 @@ def scenario_draw_circle_on_fake_bus() -> None:
         relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
         check(all(value == 0 for value in relaxed),
               "после рисования все моторы расслаблены", str(relaxed))
+        # Мотор не дошёл до своей цели: именно это и ломало рисование.
+        check(bus.present_positions != bus.goal_positions,
+              "мотор остался на мёртвой зоне, а не в цели")
 
 
 def scenario_torque_release_survives_lost_frames() -> None:
@@ -428,6 +445,331 @@ def scenario_torque_release_survives_lost_frames() -> None:
               f"записей удержания: {torque_writes}")
 
 
+def scenario_draw_without_torque_signal() -> None:
+    print("\n10. Без нагрузки на моторах рисование продолжается")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True) as bus:
+        # Моторы не отдают регистр нагрузки.
+        bus.fail_load_reads = True
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0,
+              "захват плоскости без нагрузки завершился успешно",
+              capture.stderr.strip()[:400])
+
+        if not plane_path.exists():
+            check(False, "файл плоскости существует для рисования")
+            return
+        plane = json.loads(plane_path.read_text())
+        draw = run("draw_circle", workspace,
+                   "--center", f"{plane['contact_x_m']:.4f}",
+                   f"{plane['contact_y_m']:.4f}",
+                   "--radius", "0.02", "--points", "8",
+                   "--plane", str(plane_path), "--no-confirm", stdin_data="\n")
+        # Нагрузка необязательна: без неё программа работает по высоте из
+        # плоскости, нажим не проверяет, а точки считает «без нажима».
+        check(draw.returncode == 0,
+              "без нагрузки рисование всё равно завершилось",
+              draw.stderr.strip()[:400])
+        output = draw.stdout + draw.stderr
+        done_line = next((line for line in draw.stdout.splitlines()
+                          if line.startswith("Done:")), "")
+        check(bool(done_line), "программа отчиталась о завершении",
+              draw.stdout.strip()[-200:])
+        check("Done: 8 points" in done_line,
+              "все точки окружности пройдены", done_line)
+        # Счётчик отчёта: точки без нажима. Он равен числу точек — нажима
+        # не было ни на одной.
+        check("points without press 8" in done_line,
+              "все точки посчитаны «без нажима»", done_line)
+        check("not readable" not in output.lower(),
+              "программа не жаловалась на нечитаемую нагрузку",
+              output.strip()[-200:])
+        check("Drawing stopped" not in output,
+              "рисование не прервано", output.strip()[-200:])
+        # Нагрузку программа всё-таки пыталась читать: отказ мотора виден
+        # на шине, и он не помешал рисованию.
+        check(bus.load_reads > 0,
+              "программа читала нагрузку и получила отказ мотора",
+              f"чтений нагрузки: {bus.load_reads}")
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после рисования все моторы расслаблены", str(relaxed))
+
+
+def scenario_draw_without_contact_option() -> None:
+    """Рисование с ключом --no-contact: нагрузка не читается вовсе.
+
+    Отдельный случай, а не продолжение десятого: там мотор отказывает в
+    ответе, а здесь программа сама не спрашивает. Нагрузка читаться может,
+    но не читается — и это видно на шине по числу чтений регистра.
+    """
+    print("\n11. Рисование без чтения нагрузки (--no-contact)")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True,
+                      deadband_steps=20) as bus:
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0,
+              "захват плоскости завершился успешно", capture.stderr.strip()[:400])
+        if not plane_path.exists():
+            check(False, "файл плоскости существует для рисования")
+            return
+
+        # Бумага там, где рука стояла после захвата.
+        bus.paper_steps = list(bus.goal_positions)
+        plane = json.loads(plane_path.read_text())
+
+        # Захват с тем же ключом: высота касанием не уточняется, и нагрузка
+        # не читается вовсе. Флаг --no-contact действует и на захват, а не
+        # только на рисование: иначе «--set-plane --no-contact» всё равно
+        # читал бы нагрузку при уточнении высоты бумаги.
+        plane_without = pathlib.Path(workspace) / "draw_plane_no_contact.json"
+        reads_before_capture = bus.load_reads
+        capture_without = run("draw_circle", workspace, "--set-plane",
+                              "--plane", str(plane_without),
+                              "--tilt-tolerance", "90", "--no-contact",
+                              stdin_data="\n")
+        check(capture_without.returncode == 0,
+              "захват без нагрузки завершился успешно",
+              capture_without.stderr.strip()[:400])
+        check(bus.load_reads == reads_before_capture,
+              "при захвате нагрузка не читалась ни разу",
+              f"чтений нагрузки: {bus.load_reads - reads_before_capture}")
+
+        # Захват нагрузку читал: уточнял высоту бумаги касанием. Считаем
+        # эти чтения отдельно, чтобы видеть, читал ли их сам рисунок.
+        reads_before_draw = bus.load_reads
+
+        draw = run("draw_circle", workspace,
+                   "--center", f"{plane['contact_x_m']:.4f}",
+                   f"{plane['contact_y_m']:.4f}",
+                   "--radius", "0.02", "--points", "8",
+                   "--plane", str(plane_path), "--no-confirm", "--no-contact",
+                   stdin_data="\n")
+        check(draw.returncode == 0,
+              "рисование без нагрузки завершилось успешно",
+              draw.stderr.strip()[:400])
+        done_line = next((line for line in draw.stdout.splitlines()
+                          if line.startswith("Done:")), "")
+        check("Done: 8 points" in done_line,
+              "все точки окружности пройдены", done_line)
+        # Нажим не проверялся, поэтому ни одна точка не «с отрывом» по
+        # нагрузке, но все посчитаны «без нажима»: проверять было нечем.
+        check("points without press 8" in done_line,
+              "все точки посчитаны «без нажима»", done_line)
+        check(bus.load_reads == reads_before_draw,
+              "нагрузка не читалась ни разу за рисование",
+              f"чтений нагрузки: {bus.load_reads - reads_before_draw}")
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после рисования все моторы расслаблены", str(relaxed))
+
+
+def scenario_draw_with_unreachable_points() -> None:
+    """Круг с недостижимыми точками: недостижимое рисуется по приближению.
+
+    Недостижимая точка — не повод бросить круг: программа говорит о ней и
+    идёт к следующей. Но раньше моторам уходила поза предыдущей точки: рука
+    не двигалась вовсе, и точка выпадала из круга дыркой. Теперь моторам
+    уходит лучшее приближение, и точка дорисовывается — насколько позволяет
+    досягаемость.
+    """
+    print("\n12. Круг с недостижимыми точками рисуется по приближению")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True,
+                      deadband_steps=20) as bus:
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0, "захват плоскости завершился успешно",
+              capture.stderr.strip()[:400])
+        if not plane_path.exists():
+            check(False, "файл плоскости существует для рисования")
+            return
+
+        bus.paper_steps = list(bus.goal_positions)
+        # Центр окружности унесён вбок: часть точек заведомо вне досягаемости,
+        # часть — рядом с рукой. Подстройка выключена, чтобы команды шли
+        # ровно по одной на точку.
+        draw = run("draw_circle", workspace, "--center", "0.26", "0.05",
+                   "--radius", "0.05", "--points", "8",
+                   "--plane", str(plane_path), "--no-confirm", "--no-compensate",
+                   stdin_data="\n")
+        output = draw.stdout + draw.stderr
+        check(draw.returncode == 0,
+              "рисование не остановилось на недостижимых точках",
+              draw.stderr.strip()[:400])
+        check("недостижимы" in draw.stdout,
+              "программа сказала, какие точки недостижимы",
+              draw.stdout.strip()[-300:])
+        done_line = next((line for line in draw.stdout.splitlines()
+                          if line.startswith("Done:")), "")
+        check(bool(done_line), "программа отчиталась о завершении", done_line)
+        check("unreachable points 2" in done_line,
+              "недостижимые точки посчитаны отдельно", done_line)
+        # Недостижимая точка не выпадает из круга: моторам ушло лучшее
+        # приближение, и рука дошла до него. Раньше моторам уходила поза
+        # предыдущей точки, рука не двигалась, и точка пропускалась.
+        check("Done: 8 points" in done_line,
+              "все точки пройдены, недостижимые — по приближению", done_line)
+        check("точка пропущена" not in draw.stdout,
+              "недостижимые точки не выпали из круга",
+              draw.stdout.strip()[-300:])
+        check("Drawing stopped" not in output,
+              "рисование не прервано", output.strip()[-200:])
+        relaxed = [bus.torque_state(servo) for servo in range(1, 7)]
+        check(all(value == 0 for value in relaxed),
+              "после рисования все моторы расслаблены", str(relaxed))
+
+        # Команда моторам на недостижимой точке отличается от команды
+        # предыдущей точки.
+        #
+        # Отдельный прогон без поиска касания и без подстройки: тогда на
+        # каждую точку уходит ровно одна команда, и по шине видно, что на
+        # недостижимой точке команда не копия предыдущей.
+        before = len(bus.writes_to(REG_GOAL_POSITION))
+        draw2 = run("draw_circle", workspace, "--center", "0.26", "0.05",
+                    "--radius", "0.05", "--points", "8",
+                    "--plane", str(plane_path), "--no-confirm", "--no-contact",
+                    "--no-compensate", stdin_data="\n")
+        check(draw2.returncode == 0,
+              "рисование без нагрузки завершилось успешно",
+              draw2.stderr.strip()[:400])
+        unreachable = [int(number) for number
+                       in re.findall(r"точка (\d+): IK не сошёлся",
+                                     draw2.stdout)]
+        check(bool(unreachable),
+              "программа назвала недостижимые точки",
+              str(unreachable))
+        # По шесть записей цели на команду: по одной на мотор.
+        goals = bus.writes_to(REG_GOAL_POSITION)[before:]
+        commands = [goals[index * 6:(index + 1) * 6]
+                    for index in range(len(goals) // 6)]
+        check(len(commands) == 8,
+              "на каждую точку ушла ровно одна команда",
+              f"команд: {len(commands)}")
+        for number in unreachable:
+            if number < 2 or number > len(commands):
+                continue
+            previous = commands[number - 2]
+            current = commands[number - 1]
+            check(previous != current,
+                  f"на недостижимой точке {number} команда отличается от "
+                  "предыдущей",
+                  f"{previous} против {current}")
+
+
+
+def scenario_draw_without_contact_found() -> None:
+    """Касание не найдено: программа говорит почему и на какой высоте.
+
+    Бумага, которая не даёт реакции, — это не поломка программы, а
+    неверная плоскость или неверные пороги. Но сказать об этом надо
+    правильно: с пустой причиной («касание не найдено ()») оператор не
+    поймёт, куда смотреть. И уровень нагрузки на свободной высоте нужен
+    для того же: если он велик, «свободная» высота свободна не была.
+    """
+    print("\n13. Касание не найдено: сказано почему и на какой высоте")
+    limits = urdf_limits()
+    mins = [item[0] for item in limits]
+    maxs = [item[1] for item in limits]
+    present = steps_for_angles([0.0, -30.0, 60.0, 30.0, 0.0, 0.0])
+    with FakeServoBus(mins, maxs, present, follow_goal=True,
+                      deadband_steps=20) as bus:
+        port = bus.start()
+        workspace = build_config(port)
+        plane_path = pathlib.Path(workspace) / "draw_plane.json"
+
+        capture = run("draw_circle", workspace, "--set-plane",
+                      "--plane", str(plane_path), "--tilt-tolerance", "90",
+                      stdin_data="\n")
+        check(capture.returncode == 0, "захват плоскости завершился успешно",
+              capture.stderr.strip()[:400])
+        if not plane_path.exists():
+            check(False, "файл плоскости существует для рисования")
+            return
+        plane = json.loads(plane_path.read_text())
+
+        # Бумага ниже любой цели: нагрузка всегда нулевая, касание не
+        # находится никогда.
+        bus.paper_steps = list(mins)
+        draw = run("draw_circle", workspace, "--center",
+                   f"{plane['contact_x_m']:.4f}", f"{plane['contact_y_m']:.4f}",
+                   "--radius", "0.02", "--points", "4",
+                   "--plane", str(plane_path), "--no-confirm", stdin_data="\n")
+        check(draw.returncode == 0, "рисование продолжилось без касания",
+              draw.stderr.strip()[:400])
+        check("касание не найдено" in draw.stdout,
+              "программа сказала, что касания нет", draw.stdout.strip()[-300:])
+        # Причина непустая: сколько шагов спуска бумага не отвечала.
+        reason = next((line for line in draw.stdout.splitlines()
+                       if "касание не найдено" in line), "")
+        check("()" not in reason and "шагов спуска" in reason,
+              "причина названа, а не оставлена пустой", reason)
+        # Уровень нагрузки на свободной высоте: по нему видно, что «свободная»
+        # высота была свободна.
+        check("the load at the free height was" in draw.stdout,
+              "назван уровень нагрузки на свободной высоте",
+              draw.stdout.strip()[-300:])
+        # Нажим по нагрузке не проверяется, но сигнал читается: это не то же
+        # самое, что «нагрузка недоступна».
+        check("нагрузка доступна, нажим по ней не проверяется" in draw.stdout,
+              "нажим не проверяется, а сигнал читается — сказано отдельно",
+              draw.stdout.strip()[-300:])
+        check("нагрузка недоступна" not in draw.stdout,
+              "сообщения о недоступной нагрузке тут быть не должно",
+              draw.stdout.strip()[-300:])
+        done_line = next((line for line in draw.stdout.splitlines()
+                          if line.startswith("Done:")), "")
+        check("Done: 4 points" in done_line,
+              "все точки пройдены по высоте плоскости", done_line)
+        check("points without press 4" in done_line,
+              "точки посчитаны «без нажима»", done_line)
+
+        # Тот же случай в захвате: высота касанием не уточняется, и сообщение
+        # говорит почему и на какой высоте.
+        capture_without = run("draw_circle", workspace, "--set-plane",
+                              "--plane", str(pathlib.Path(workspace) /
+                                             "draw_plane_no_paper.json"),
+                              "--tilt-tolerance", "90", stdin_data="\n")
+        check(capture_without.returncode == 0,
+              "захват без бумаги завершился успешно",
+              capture_without.stderr.strip()[:400])
+        check("Высота бумаги касанием не уточнена" in capture_without.stdout,
+              "захват сказал, что высота не уточнена",
+              capture_without.stdout.strip()[-300:])
+        check("шагов спуска" in capture_without.stdout,
+              "причина названа и при захвате",
+              capture_without.stdout.strip()[-300:])
+        check("the load at the free height was" in capture_without.stdout,
+              "уровень на свободной высоте назван и при захвате",
+              capture_without.stdout.strip()[-300:])
+
+
 def main() -> int:
     if not (BUILD / "cartesian_control").exists():
         raise SystemExit("сначала соберите проект: cmake --build build")
@@ -445,6 +787,10 @@ def main() -> int:
     scenario_generator_reads_bus()
     scenario_draw_circle_on_fake_bus()
     scenario_torque_release_survives_lost_frames()
+    scenario_draw_without_torque_signal()
+    scenario_draw_without_contact_option()
+    scenario_draw_with_unreachable_points()
+    scenario_draw_without_contact_found()
 
     print()
     if failures:

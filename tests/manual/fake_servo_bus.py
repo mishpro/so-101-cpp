@@ -33,6 +33,9 @@ REG_MAX_POSITION_LIMIT = 0x0B
 REG_GOAL_POSITION = 0x2A
 REG_GOAL_VELOCITY = 0x2E
 REG_PRESENT_POSITION = 0x38
+REG_PRESENT_SPEED = 0x3A
+REG_PRESENT_CURRENT = 0x3C
+REG_PRESENT_LOAD = 0x3E
 REG_TORQUE_ENABLE = 0x28
 
 # Байт команды в пакете: 0x02 — чтение, 0x03 — запись.
@@ -48,7 +51,7 @@ class FakeServoBus:
     """Обслуживает шесть моторов на slave-конце псевдо-порта."""
 
     def __init__(self, min_positions, max_positions, present_positions=None,
-                 follow_goal=False):
+                 follow_goal=False, deadband_steps=0, paper_steps=None):
         if not (len(min_positions) == len(max_positions) == 6):
             raise ValueError("ожидаются ровно шесть моторов")
         self.min_positions = [int(value) for value in min_positions]
@@ -65,6 +68,25 @@ class FakeServoBus:
         # ждут фактического достижения точки (рисование круга), без этого
         # ждать бессмысленно: они упрутся в таймаут.
         self.follow_goal = follow_goal
+        # deadband_steps: мёртвая зона мотора. Настоящий STS3215 до своей
+        # цели не доходит — останавливается на зоне раньше, — и из-за этого
+        # рисование круга останавливалось на первой точке. Здесь зона
+        # воспроизводится в отсчётах мотора.
+        self.deadband_steps = int(deadband_steps)
+        # paper_steps: уровень бумаги по каждому мотору. Пока цель мотора
+        # ниже бумаги, бумага давит в ответ, и это видно в регистре
+        # нагрузки. По умолчанию бумага там, где рука стояла изначально.
+        self.paper_steps = (list(paper_steps) if paper_steps is not None
+                             else list(self.present_positions))
+        # fail_load_reads: моторы не отвечают на чтение нагрузки. Настоящий
+        # STS3215 так умеет. Нагрузка нужна только для уточнения высоты
+        # бумаги и для проверки нажима, поэтому её отсутствие — не поломка:
+        # программа продолжает рисовать по высоте из плоскости и считает
+        # точки «без нажима».
+        self.fail_load_reads = False
+        # Сколько раз читался регистр нагрузки: по нему видно, пыталась ли
+        # программа нагрузку читать.
+        self.load_reads = 0
         self.writes: list[tuple[int, int, int]] = []
         # Состояние удержания каждого мотора: сервопривод по умолчанию
         # держит позицию, и программа читает это состояние обратно, чтобы
@@ -188,8 +210,15 @@ class FakeServoBus:
         address = packet[5]
         index = servo_id - 1
         value = self._register(index, address) if 0 <= index < 6 else 0
-        reply = bytes([0xFF, 0xFF, servo_id, 0x00, 0x00,
-                       value & 0xFF, (value >> 8) & 0xFF, 0x00])
+        error = 0x00
+        if address in (REG_PRESENT_LOAD, REG_PRESENT_CURRENT):
+            self.load_reads += 1
+        if self.fail_load_reads and address in (REG_PRESENT_LOAD,
+                                                REG_PRESENT_CURRENT):
+            # Мотор отвечает ошибкой: регистр он не отдаёт.
+            error = 0x01
+        reply = bytes([0xFF, 0xFF, servo_id, 0x00, error,
+                        value & 0xFF, (value >> 8) & 0xFF, 0x00])
         return reply[:7] + bytes([checksum(reply, 2, 6)])
 
     def _handle_write(self, packet: bytes) -> None:
@@ -213,8 +242,21 @@ class FakeServoBus:
         if 0 <= servo_id - 1 < 6 and address == REG_GOAL_POSITION:
             self.goal_positions[servo_id - 1] = value
             if self.follow_goal:
-                self.present_positions[servo_id - 1] = value
+                # Мотор идёт к цели, но останавливается на мёртвой зоне
+                # раньше: до цели он не доходит.
+                self.present_positions[servo_id - 1] = self._with_deadband(
+                    servo_id - 1, value)
         return None
+
+    def _with_deadband(self, index: int, goal: int) -> int:
+        """Положение мотора с учётом мёртвой зоны: до цели он не доходит."""
+        if self.deadband_steps <= 0:
+            return goal
+        present = self.present_positions[index]
+        step = goal - present
+        if abs(step) <= self.deadband_steps:
+            return present
+        return goal - (self.deadband_steps if step > 0 else -self.deadband_steps)
 
     def _register(self, index: int, address: int) -> int:
         if address == REG_MIN_POSITION_LIMIT:
@@ -229,7 +271,18 @@ class FakeServoBus:
             return 0
         if address == REG_TORQUE_ENABLE:
             return self.torque_switches[index]
+        if address == REG_PRESENT_LOAD:
+            return self._load(index)
+        if address == REG_PRESENT_CURRENT:
+            return self._load(index)
         return 0
+
+    def _load(self, index: int) -> int:
+        """Нагрузка на мотор: бумага давит в ответ, когда цель ниже бумаги."""
+        depth = self.paper_steps[index] - self.goal_positions[index]
+        if depth <= 0:
+            return 0
+        return min(1000, depth * 4)
 
     # --- проверки -------------------------------------------------------
 

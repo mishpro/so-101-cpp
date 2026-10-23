@@ -90,6 +90,13 @@ add_library(arm_feedback INTERFACE)
 target_include_directories(arm_feedback INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(arm_feedback INTERFACE servo_bus)
 
+# Касание и нажим: решение по нагрузке на моторы. Без железа — значит,
+# проверяется тестами без робота.
+add_library(surface_contact surface_contact.cpp)
+target_include_directories(surface_contact PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(surface_contact PUBLIC servo_bus)
+so101_configure_target(surface_contact)
+
 # Что и где рисуем: плоскость и окружность. Без железа — значит, проверяется
 # в тестах без робота.
 add_library(drawing drawing.cpp)
@@ -100,7 +107,8 @@ so101_configure_target(drawing)
 # Как рисуем: захват плоскости и обход траектории.
 add_library(drawing_execution drawing_execution.cpp)
 target_include_directories(drawing_execution PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(drawing_execution PUBLIC arm_model drawing arm_feedback)
+target_link_libraries(drawing_execution PUBLIC arm_model drawing arm_feedback
+                                        surface_contact)
 so101_configure_target(drawing_execution)
 
 # Единственное место, где логика рисования встречается с шиной.

@@ -548,6 +548,39 @@ std::optional<float> read_joint_angle(SerialPort& port, uint8_t servo_id,
     return static_cast<float>(limits.position_to_degrees(present_position));
 }
 
+std::optional<float> read_servo_goal_angle(SerialPort& port, uint8_t servo_id,
+                                           const ServoLimits& limits) {
+	uint16_t goal_position = 0;
+	if (!read_register(port, servo_id, Register::goal_position, goal_position)) {
+		return std::nullopt;
+	}
+	// Границы мотора здесь не проверяются: цель за пределами диапазона —
+	// это признак того, что мотор получил команду, которой он выполнять
+	// не должен, и проверка только спрятала бы признак.
+	return static_cast<float>(limits.position_to_degrees(goal_position));
+}
+
+std::optional<uint16_t> read_raw_register(SerialPort& port, uint8_t servo_id,
+                                           Register address) {
+	uint16_t value = 0;
+	if (!read_register(port, servo_id, address, value)) {
+		return std::nullopt;
+	}
+	return value;
+}
+
+std::optional<int32_t> read_servo_torque_signal(SerialPort& port,
+                                                 uint8_t servo_id,
+                                                 Register address) {
+	uint16_t raw = 0;
+	if (!read_register(port, servo_id, address, raw)) {
+		return std::nullopt;
+	}
+	// Знак всегда учитывается: ток упирающегося мотора отрицателен, и
+	// беззнаковое прочтение дало бы 65500 вместо минуса.
+	return static_cast<int32_t>(static_cast<int16_t>(raw));
+}
+
 std::optional<bool> read_servo_torque_enabled(SerialPort& port, uint8_t servo_id) {
 	uint16_t value = 0;
 	if (!read_register(port, servo_id, Register::torque_enable, value)) {

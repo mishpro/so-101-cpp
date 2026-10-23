@@ -2,6 +2,8 @@
 
 #include <unistd.h>
 
+#include <algorithm>
+
 #include "control_config.hpp"
 
 namespace so101 {
@@ -53,6 +55,32 @@ bool SerialArmFeedback::hold_motors(const JointMask& joints) {
 		succeeded = enable_servo_torque(port_, servo_id) && succeeded;
 	}
 	return succeeded;
+}
+
+std::optional<JointDegrees> SerialArmFeedback::read_goal_degrees() {
+	JointDegrees degrees{};
+	for (std::size_t index = 0; index < kServoCount; ++index) {
+		const auto servo_id = static_cast<uint8_t>(index + 1);
+		const std::optional<float> angle =
+		    read_servo_goal_angle(port_, servo_id, limits_[index]);
+		if (!angle) return std::nullopt;
+		degrees[index] = static_cast<double>(*angle);
+	}
+	return degrees;
+}
+
+std::optional<TorqueSignal> SerialArmFeedback::read_torque_signals(
+    std::size_t motors) {
+	TorqueSignal signal{};
+	const std::size_t count = std::min(motors, kServoCount);
+	for (std::size_t index = 0; index < count; ++index) {
+		const auto servo_id = static_cast<uint8_t>(index + 1);
+		const std::optional<int32_t> value =
+		    read_servo_torque_signal(port_, servo_id, torque_register_);
+		if (!value) return std::nullopt;
+		signal[index] = *value;
+	}
+	return signal;
 }
 
 }  // namespace so101

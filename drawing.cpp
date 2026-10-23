@@ -17,7 +17,6 @@ constexpr double kPiDrawing = 3.14159265358979323846;
 
 std::vector<Eigen::Vector3d> circle_targets(const Plane& plane,
                                              const CircleSpec& circle,
-                                             double press_m,
                                              const Eigen::Vector3d& current_position) {
 	std::vector<Eigen::Vector3d> targets;
 	if (circle.points == 0 || circle.radius_m <= 0.0) return targets;
@@ -31,16 +30,13 @@ std::vector<Eigen::Vector3d> circle_targets(const Plane& plane,
 	const double start_angle =
 	    std::round(current_angle / step) * step;
 
-	// Высота цели: плоскость минус нажатие. Карандаш должен давить на
-	// бумагу, иначе он просто не оставит следа.
-	const double height = plane.tcp_height_m - press_m;
-
 	for (std::size_t index = 0; index < circle.points; ++index) {
 		const double angle = start_angle + step * static_cast<double>(index);
 		Eigen::Vector3d target;
 		target.x() = circle.center_x_m + circle.radius_m * std::cos(angle);
 		target.y() = circle.center_y_m + circle.radius_m * std::sin(angle);
-		target.z() = height;
+		// Высота цели — высота бумаги. Нажатие добавляет исполнение.
+		target.z() = plane.tcp_height_m;
 		targets.push_back(target);
 	}
 	return targets;
